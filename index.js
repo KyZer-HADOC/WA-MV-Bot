@@ -438,7 +438,6 @@ async function start() {
     auth: state,
     ...(version ? { version } : {}),
     logger: pino({ level: 'silent' }),
-    printQRInTerminal: false,
     browser: ['WA-MV-Bot', 'Chrome', '1.0.0'],
     markOnlineOnConnect: false,
     syncFullHistory: false
