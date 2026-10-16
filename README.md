@@ -44,3 +44,10 @@ If you do not know a group JID yet, leave one or both group variables empty and 
 - SinhalaSub can change its website markup or block automated requests; search may stop working until selectors are updated.
 - Posters and metadata depend on what the source page exposes.
 - The bot sends details and poster to the movie group by default. It only sends a media file when you configure an authorized direct HTTPS file URL.
+## Run on your own Windows PC (no hosting account or payment card)
+
+This is the simplest $0 option. Download the repository ZIP from GitHub, extract it to a normal folder, and run `run-windows.bat`. The launcher checks for Node.js 20+, creates `.env` from `.env.example` the first time, installs dependencies, and starts the bot.
+
+If you do not know the group JIDs yet, leave the two variables blank, save `.env`, start the bot, and send a message in each of the two groups. Copy the `groupJid` values from the console into `REQUEST_GROUP_JID` and `MOVIE_GROUP_JID` in `.env`, then stop and restart the bot.
+
+The PC must remain switched on and connected to the internet while the bot is running. Disable Windows Sleep while plugged in, but keep the display free to turn off. Keep `.env` and `auth_info` private and never upload them to GitHub. This local option has no hosting bill, but it is not independent of your PC, electricity, or internet connection.
