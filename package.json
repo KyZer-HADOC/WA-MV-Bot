@@ -1,7 +1,7 @@
 {
   "name": "wa-mv-bot",
-  "version": "1.0.0",
-  "description": "WhatsApp group movie-request bot with plain-text search and numbered reply selection",
+  "version": "1.1.0",
+  "description": "WhatsApp movie request bot with SinhalaSub metadata search and reply-to-select flow",
   "main": "index.js",
   "type": "module",
   "scripts": {
@@ -12,8 +12,8 @@
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.18",
-    "axios": "^1.7.9",
     "dotenv": "^16.4.7",
-    "pino": "^9.6.0"
+    "pino": "^9.6.0",
+    "puppeteer": "^25.12.0"
   }
 }
