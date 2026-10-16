@@ -70,6 +70,7 @@ function isGroupJid(jid) {
 
 function normalizeTitle(value) {
   return String(value || '')
+    .replace(/\s*(?:sinhala\s+subtitles?|sinhala\s+sub|සිංහල\s+උපසිරසි.*)$/iu, '')
     .toLocaleLowerCase()
     .normalize('NFKC')
     .replace(/[^\p{L}\p{N}]+/gu, ' ')
