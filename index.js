@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import axios from 'axios';
+import qrcode from 'qrcode-terminal';
 import * as cheerio from 'cheerio';
 import pino from 'pino';
 import path from 'node:path';
@@ -437,7 +438,7 @@ async function start() {
     auth: state,
     ...(version ? { version } : {}),
     logger: pino({ level: 'silent' }),
-    printQRInTerminal: true,
+    printQRInTerminal: false,
     browser: ['WA-MV-Bot', 'Chrome', '1.0.0'],
     markOnlineOnConnect: false,
     syncFullHistory: false
@@ -445,7 +446,11 @@ async function start() {
 
   sock.ev.on('creds.update', saveCreds);
 
-  sock.ev.on('connection.update', ({ connection, lastDisconnect }) => {
+  sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
+    if (qr) {
+      logger.info('Scan this QR code with WhatsApp > Linked devices > Link a device.');
+      qrcode.generate(qr, { small: true });
+    }
     if (connection === 'open') logger.info('WhatsApp connected.');
     if (connection === 'close') {
       const code = lastDisconnect?.error?.output?.statusCode;
