@@ -4,7 +4,7 @@ A WhatsApp group movie-request bot. Members type a movie title as ordinary text 
 
 ## Current behavior
 
-- Uses SinhalaSub.lk page search and metadata selectors based on the existing KyZer SinhalaSub plugin; no TMDB API key is required.
+- Uses lightweight HTTP requests and HTML parsing to search SinhalaSub.lk, based on the selectors in the existing KyZer SinhalaSub plugin; no TMDB API key or browser download is required.
 - Shows title, language, listed quality/format, and numbered choices.
 - On selection, fetches the title page's metadata (language, duration, IMDb rating, genres, director(s), cast) and attempts to send the poster with the details to the destination group.
 - A numeric choice is accepted only as a reply to a current bot-generated list, and only from the person who requested that list.
@@ -34,7 +34,7 @@ If you do not know a group JID yet, leave one or both group variables empty and 
 
 ## Hosting and account notes
 
-- Puppeteer downloads a compatible browser; make sure the hosting build allows Puppeteer's install script and has enough memory and disk space.
+- The search uses Axios and Cheerio instead of a full browser to reduce memory and storage needs on free hosting. If SinhalaSub blocks HTTP requests or changes its HTML, the scraper may need updates.
 - Keep the auth_info folder on persistent storage. An ephemeral filesystem may lose the WhatsApp session on restart/redeploy.
 - Free hosting can sleep or enforce usage limits; 24/7 uptime is not guaranteed.
 - This uses unofficial WhatsApp Web automation through Baileys. WhatsApp may restrict accounts using unofficial automation. Using your personal WhatsApp number has risk; a separate number/account is safer when available.
