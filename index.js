@@ -1,8 +1,9 @@
 import 'dotenv/config';
+import axios from 'axios';
+import * as cheerio from 'cheerio';
 import pino from 'pino';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import puppeteer from 'puppeteer';
 import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
@@ -82,189 +83,207 @@ function safeText(value, fallback = 'Not listed') {
   return cleaned || fallback;
 }
 
-async function withBrowser(action) {
-  const browser = await puppeteer.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+const SITE_ORIGIN = 'https://sinhalasub.lk';
+const HTTP_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+  'Accept-Language': 'en-US,en;q=0.9,si;q=0.8',
+  'Cache-Control': 'no-cache'
+};
+
+async function fetchHtml(url) {
+  const response = await axios.get(url, {
+    headers: HTTP_HEADERS,
+    timeout: 25000,
+    maxRedirects: 5,
+    maxContentLength: 8 * 1024 * 1024,
+    responseType: 'text'
   });
+  if (typeof response.data !== 'string') {
+    throw new Error('SinhalaSub returned a non-text response.');
+  }
+  return response.data;
+}
+
+function absoluteHttpUrl(value, baseUrl = SITE_ORIGIN) {
+  if (!value) return '';
   try {
-    return await action(browser);
-  } finally {
-    await browser.close().catch(() => {});
+    const url = new URL(value, baseUrl);
+    return ['http:', 'https:'].includes(url.protocol) ? url.href : '';
+  } catch {
+    return '';
+  }
+}
+
+function isSinhalaSubUrl(value) {
+  try {
+    const host = new URL(value).hostname.toLowerCase();
+    return host === 'sinhalasub.lk' || host.endsWith('.sinhalasub.lk');
+  } catch {
+    return false;
   }
 }
 
 async function searchMovies(query) {
-  const searchUrl = 'https://sinhalasub.lk/?s=' + encodeURIComponent(query) + '&post_type=movies';
+  const searchUrl = SITE_ORIGIN + '/?s=' + encodeURIComponent(query) + '&post_type=movies';
+  const html = await fetchHtml(searchUrl);
+  const $ = cheerio.load(html);
+  const results = [];
+  const seen = new Set();
 
-  return withBrowser(async browser => {
-    const page = await browser.newPage();
-    page.setDefaultNavigationTimeout(30000);
-    await page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+  const cardSelectors = [
+    '.display-item .item-box',
+    '.item-box',
+    '.movie-item',
+    'article'
+  ];
+  let cards = [];
+  for (const selector of cardSelectors) {
+    const matches = $(selector).toArray();
+    if (matches.length) {
+      cards = matches;
+      break;
+    }
+  }
+
+  const pushCard = (box, anchor) => {
+    const $box = $(box);
+    const $anchor = $(anchor);
+    const href = absoluteHttpUrl($anchor.attr('href'), searchUrl);
+    if (!href || !isSinhalaSubUrl(href) || seen.has(href)) return;
+    if (new URL(href).pathname === '/' || href.split('#')[0] === searchUrl) return;
+
+    const $image = $box.find('img, .thumb').first();
+    const title = safeText(
+      $anchor.attr('title') ||
+      $box.find('h1, h2, h3, .title, .movie-title').first().text() ||
+      $image.attr('alt') ||
+      $anchor.text(),
+      ''
     );
-    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForSelector('.display-item .item-box, .item-box, article', { timeout: 10000 }).catch(() => {});
+    if (!title || title.length < 2) return;
 
-    const results = await page.evaluate(maxResults => {
-      const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
-      let boxes = Array.from(document.querySelectorAll('.display-item .item-box'));
-      if (!boxes.length) {
-        boxes = Array.from(document.querySelectorAll('.item-box, .movie-item, article'))
-          .filter(box => box.querySelector('a[href*="/movies/"]'));
-      }
+    const language = safeText($box.find('.item-desc-giha .language, .language, [class*="language"]').first().text(), '');
+    const quality = safeText($box.find('.item-desc-giha .quality, .quality, [class*="quality"]').first().text(), '');
+    const format = safeText($box.find('.item-desc-giha .qty, .qty, [class*="qty"]').first().text(), '');
+    const poster = absoluteHttpUrl(
+      $image.attr('data-src') || $image.attr('data-lazy-src') || $image.attr('src') || '',
+      searchUrl
+    );
 
-      const output = [];
-      const seen = new Set();
+    seen.add(href);
+    results.push({ title, movieUrl: href, poster, language, quality, format });
+  };
 
-      for (const box of boxes) {
-        const anchors = Array.from(box.querySelectorAll('a[href]'));
-        const anchor =
-          anchors.find(a => clean(a.getAttribute('title')) && a.href.includes('/movies/')) ||
-          anchors.find(a => a.href.includes('/movies/') && a.querySelector('img')) ||
-          anchors.find(a => a.href.includes('/movies/'));
+  for (const box of cards) {
+    const anchors = $(box).find('a[href]').toArray();
+    if (!anchors.length) continue;
+    const anchor = anchors.find(a => $(a).attr('title') && isSinhalaSubUrl(absoluteHttpUrl($(a).attr('href'), searchUrl)))
+      || anchors.find(a => $(a).find('img').length && isSinhalaSubUrl(absoluteHttpUrl($(a).attr('href'), searchUrl)))
+      || anchors.find(a => isSinhalaSubUrl(absoluteHttpUrl($(a).attr('href'), searchUrl)));
+    if (anchor) pushCard(box, anchor);
+    if (results.length >= MAX_RESULTS) break;
+  }
 
-        if (!anchor) continue;
-        const movieUrl = new URL(anchor.href, location.origin).href;
-        if (!movieUrl.startsWith(location.origin) || seen.has(movieUrl)) continue;
-        seen.add(movieUrl);
+  // Fallback if the site's result cards changed but still contain title links and thumbnails.
+  if (!results.length) {
+    const anchors = $('a[href]').toArray().filter(anchor => {
+      const href = absoluteHttpUrl($(anchor).attr('href'), searchUrl);
+      return href && isSinhalaSubUrl(href) &&
+        (Boolean($(anchor).attr('title')) || $(anchor).find('img').length > 0);
+    });
+    for (const anchor of anchors) {
+      pushCard($(anchor).closest('article, li, .item-box, .movie-item, .display-item').get(0) || anchor, anchor);
+      if (results.length >= MAX_RESULTS) break;
+    }
+  }
 
-        const image = box.querySelector('img, .thumb');
-        const title = clean(
-          anchor.getAttribute('title') ||
-          box.querySelector('h1, h2, h3, .title, .movie-title')?.textContent ||
-          image?.getAttribute('alt')
-        );
-        if (!title) continue;
-
-        const language = clean(
-          box.querySelector('.item-desc-giha .language, .language, [class*="language"]')?.textContent
-        );
-        const quality = clean(
-          box.querySelector('.item-desc-giha .quality, .quality, [class*="quality"]')?.textContent
-        );
-        const format = clean(
-          box.querySelector('.item-desc-giha .qty, .qty, [class*="qty"]')?.textContent
-        );
-        const poster = image
-          ? (image.getAttribute('data-src') || image.getAttribute('data-lazy-src') || image.currentSrc || image.src || '')
-          : '';
-
-        output.push({ title, movieUrl, poster, language, quality, format });
-        if (output.length >= maxResults) break;
-      }
-
-      if (!output.length) {
-        for (const anchor of document.querySelectorAll('a[href*="/movies/"]')) {
-          const movieUrl = new URL(anchor.href, location.origin).href;
-          if (!movieUrl.startsWith(location.origin) || seen.has(movieUrl)) continue;
-          const title = clean(anchor.getAttribute('title') || anchor.textContent || anchor.querySelector('img')?.alt);
-          if (!title) continue;
-          seen.add(movieUrl);
-          const image = anchor.querySelector('img') || anchor.closest('article, li, .item-box')?.querySelector('img');
-          output.push({
-            title,
-            movieUrl,
-            poster: image ? (image.getAttribute('data-src') || image.getAttribute('data-lazy-src') || image.src || '') : '',
-            language: '',
-            quality: '',
-            format: ''
-          });
-          if (output.length >= maxResults) break;
-        }
-      }
-
-      return output;
-    }, MAX_RESULTS);
-
-    return results.filter(item => item.title && item.movieUrl);
-  });
+  return results.slice(0, MAX_RESULTS);
 }
 
 async function getMovieMetadata(movie) {
-  return withBrowser(async browser => {
-    const page = await browser.newPage();
-    page.setDefaultNavigationTimeout(30000);
-    await page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
-    );
-    await page.goto(movie.movieUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForSelector('h1, .info-details, .details-title', { timeout: 10000 }).catch(() => {});
+  const html = await fetchHtml(movie.movieUrl);
+  const $ = cheerio.load(html);
+  const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
+  const firstText = selectors => {
+    for (const selector of selectors) {
+      const value = clean($(selector).first().text());
+      if (value) return value;
+    }
+    return '';
+  };
+  const listText = selectors => {
+    for (const selector of selectors) {
+      const values = [...new Set($(selector).toArray().map(el => clean($(el).text())).filter(Boolean))];
+      if (values.length) return values;
+    }
+    return [];
+  };
+  const lineValue = labels => {
+    const lines = $('body').text().split(/\r?\n/).map(line => clean(line)).filter(Boolean);
+    for (const line of lines) {
+      for (const label of labels) {
+        const match = line.match(new RegExp('^' + label + '\\s*:\\s*(.*)$', 'i'));
+        if (match) return clean(match[1]);
+      }
+    }
+    return '';
+  };
 
-    const metadata = await page.evaluate(() => {
-      const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
-      const firstText = selectors => {
-        for (const selector of selectors) {
-          const node = document.querySelector(selector);
-          const value = clean(node?.textContent || '');
-          if (value) return value;
-        }
-        return '';
-      };
-      const lists = selectors => {
-        for (const selector of selectors) {
-          const values = Array.from(document.querySelectorAll(selector))
-            .map(node => clean(node.textContent))
-            .filter(Boolean);
-          if (values.length) return [...new Set(values)];
-        }
-        return [];
-      };
-      const bodyText = document.body?.innerText || '';
-      const labelValue = label => {
-        const line = bodyText.split('\n').map(x => x.trim()).find(x => new RegExp('^' + label + '\\s*:', 'i').test(x));
-        return line ? line.replace(new RegExp('^' + label + '\\s*:\\s*', 'i'), '').trim() : '';
-      };
-      const title = firstText([
-        '.info-details .details-title h3',
-        '.details-title h3',
-        'h1.entry-title',
-        'main h1',
-        'h1'
-      ]) || document.title || '';
-      const imdbRaw = firstText(['.info-details .data-imdb', '.data-imdb', '[itemprop="ratingValue"]']) || labelValue('IMDb(?: Rating)?');
-      const imageNode = document.querySelector('.splash-bg img, .info-details img, meta[property="og:image"]');
-      const thumbnail = imageNode
-        ? (imageNode.getAttribute('content') || imageNode.getAttribute('data-src') || imageNode.currentSrc || imageNode.src || '')
-        : '';
+  const title = firstText([
+    '.info-details .details-title h3',
+    '.details-title h3',
+    'h1.entry-title',
+    'main h1',
+    'h1'
+  ]) || $('meta[property="og:title"]').attr('content') || $('title').text();
 
-      let language = '';
-      let duration = '';
-      let directors = [];
-      let stars = [];
-      document.querySelectorAll('.info-col p, .info-details p, .movie-info p').forEach(p => {
-        const strong = p.querySelector('strong, b');
-        const label = clean(strong?.textContent || '');
-        if (/language/i.test(label)) language = clean(strong?.nextSibling?.textContent || p.textContent.replace(label, '').replace(':', ''));
-        if (/duration|runtime/i.test(label)) duration = clean(strong?.nextSibling?.textContent || p.textContent.replace(label, '').replace(':', ''));
-        if (/director/i.test(label)) directors = Array.from(p.querySelectorAll('a')).map(a => clean(a.textContent)).filter(Boolean);
-        if (/stars|cast|starring/i.test(label)) stars = Array.from(p.querySelectorAll('a')).map(a => clean(a.textContent)).filter(Boolean);
-      });
+  const imdbRaw = firstText([
+    '.info-details .data-imdb',
+    '.data-imdb',
+    '[itemprop="ratingValue"]'
+  ]) || lineValue(['IMDb(?: Rating)?']);
 
-      const genres = lists(['.details-genre a', '.genres a', 'a[rel="tag"]']);
-      return {
-        title: clean(title),
-        language: clean(language || labelValue('Language')),
-        duration: clean(duration || labelValue('Duration') || labelValue('Runtime')),
-        imdb: clean(imdbRaw.replace(/IMDb(?: Rating)?\s*:?/i, '')),
-        genres,
-        directors: [...new Set(directors)],
-        stars: [...new Set(stars)],
-        thumbnail
-      };
-    });
+  const thumbnailRaw =
+    $('.splash-bg img').first().attr('data-src') ||
+    $('.splash-bg img').first().attr('data-lazy-src') ||
+    $('.splash-bg img').first().attr('src') ||
+    $('.info-details img').first().attr('data-src') ||
+    $('.info-details img').first().attr('src') ||
+    $('meta[property="og:image"]').attr('content') ||
+    movie.poster ||
+    '';
 
-    return {
-      title: safeText(metadata.title, movie.title),
-      language: safeText(metadata.language || movie.language),
-      duration: safeText(metadata.duration),
-      imdb: safeText(metadata.imdb),
-      genres: metadata.genres || [],
-      directors: metadata.directors || [],
-      stars: metadata.stars || [],
-      thumbnail: metadata.thumbnail || movie.poster || ''
-    };
+  let language = '';
+  let duration = '';
+  let directors = [];
+  let stars = [];
+
+  $('.info-col p, .info-details p, .movie-info p').each((_, element) => {
+    const $p = $(element);
+    const $strong = $p.find('strong, b').first();
+    const label = clean($strong.text());
+    const wholeText = clean($p.text());
+    const value = clean(wholeText.replace(label, '').replace(/^:\s*/, ''));
+
+    if (/language/i.test(label)) language = value;
+    if (/duration|runtime/i.test(label)) duration = value;
+    if (/director/i.test(label)) directors = $p.find('a').toArray().map(a => clean($(a).text())).filter(Boolean);
+    if (/stars|cast|starring/i.test(label)) stars = $p.find('a').toArray().map(a => clean($(a).text())).filter(Boolean);
   });
+
+  const genres = listText(['.details-genre a', '.genres a', 'a[rel="tag"]']);
+
+  return {
+    title: safeText(title, movie.title),
+    language: safeText(language || lineValue(['Language']), movie.language || 'Not listed'),
+    duration: safeText(duration || lineValue(['Duration', 'Runtime'])),
+    imdb: safeText(imdbRaw.replace(/IMDb(?: Rating)?\s*:?/i, '')),
+    genres,
+    directors: [...new Set(directors)],
+    stars: [...new Set(stars)],
+    thumbnail: absoluteHttpUrl(thumbnailRaw, movie.movieUrl) || movie.poster || ''
+  };
 }
 
 function makeResultsText(query, movies) {
