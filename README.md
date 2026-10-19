@@ -20,6 +20,15 @@ A WhatsApp group movie-request bot. Members type a movie title as ordinary text 
 5. Scan the QR code shown in the console using WhatsApp.
 6. Keep the auth_info folder persistent and private. Never commit or share it.
 
+## MovieBox API (optional)
+
+To use your own Cloudflare MovieBox API worker for title search and metadata, set these two variables in the host's environment settings:
+
+- `MOVIEBOX_API_URL`: your Worker base URL, with no trailing slash and no `/search` suffix.
+- `MOVIEBOX_SECRET`: the same secret value configured in the Worker as `MOVIEBOX_SECRET`. Keep it private.
+
+When both are configured, searches use MovieBox's `POST /search` endpoint and the bot posts the returned title metadata/poster. If either value is missing, the bot keeps using the existing SinhalaSub metadata search. The bot does not fetch or redistribute MovieBox stream/download URLs; file delivery remains limited to entries you configure in `AUTHORIZED_MEDIA_MAP` for files you own or are authorized to distribute.
+
 ## Authorized media files
 
 To send a file you own or are authorized to distribute, set AUTHORIZED_MEDIA_MAP to a JSON string mapping the normalized movie title or exact movie page URL to a direct HTTPS file URL. Example:
