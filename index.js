@@ -189,6 +189,14 @@ async function searchMovieBox(query) {
   );
 
   const items = Array.isArray(response.data?.items) ? response.data.items : [];
+  logger.info({
+    httpStatus: response.status,
+    responseKeys: response.data && typeof response.data === 'object' ? Object.keys(response.data) : [],
+    rawItemCount: items.length,
+    apiDebug: response.data?.debug ?? null,
+    apiError: response.data?.error ?? null,
+    totalCount: response.data?.pager?.totalCount ?? null
+  }, 'MovieBox API response received');
   return items.slice(0, MAX_RESULTS).map(item => ({
     provider: 'moviebox',
     subjectId: String(item.subjectId || ''),
@@ -636,7 +644,13 @@ async function start() {
           activeSearchChats.delete(jid);
         }
       } catch (error) {
-        logger.error({ err: error?.message || String(error) }, 'Could not process movie request.');
+        logger.error({
+          err: error?.message || String(error),
+          httpStatus: error?.response?.status || null,
+          apiError: typeof error?.response?.data === 'string'
+            ? error.response.data.slice(0, 300)
+            : (error?.response?.data || null)
+        }, 'Could not process movie request.');
         await sock.sendMessage(message.key.remoteJid, {
           text: '⚠️ Movie search failed. ' + (movieBoxEnabled ? 'MovieBox API may be unavailable or its secret/configuration may be incorrect.' : 'SinhalaSub may be temporarily unavailable.') + ' Please try again later.'
         }).catch(() => {});
