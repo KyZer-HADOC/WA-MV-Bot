@@ -60,6 +60,8 @@ const activeSearchChats = new Set();
 const loggedGroupJids = new Set();
 const MAX_RESULTS = 8;
 const SEARCH_TTL_MS = 10 * 60 * 1000;
+// Temporary circuit breaker: avoid repeatedly calling an upstream API that returned 429.
+let movieBoxUnavailableUntil = 0;
 
 let mediaMap = {};
 try {
@@ -214,7 +216,42 @@ async function searchMovieBox(query) {
 }
 
 async function searchMovies(query) {
-  if (movieBoxEnabled) return searchMovieBox(query);
+  if (movieBoxEnabled && Date.now() < movieBoxUnavailableUntil) {
+    const remainingSeconds = Math.ceil((movieBoxUnavailableUntil - Date.now()) / 1000);
+    logger.warn({ remainingSeconds }, 'MovieBox is temporarily unavailable; using SinhalaSub fallback.');
+  } else if (movieBoxEnabled) {
+    try {
+      const movieBoxResults = await searchMovieBox(query);
+      if (movieBoxResults.length) return movieBoxResults;
+      logger.warn({ query }, 'MovieBox returned no results; trying SinhalaSub fallback.');
+    } catch (error) {
+      const status = Number(error?.response?.status || 0);
+      const upstreamRetryAfter = Number(error?.response?.data?.retryAfterSeconds || 0);
+      let cooldownSeconds = 0;
+
+      if (status === 429) {
+        cooldownSeconds = Math.max(60, Math.min(3600, upstreamRetryAfter || 300));
+      } else if ([502, 503, 504].includes(status)) {
+        cooldownSeconds = 60;
+      } else if (!status) {
+        cooldownSeconds = 30;
+      }
+
+      if (cooldownSeconds > 0) {
+        movieBoxUnavailableUntil = Date.now() + cooldownSeconds * 1000;
+      }
+
+      logger.warn({
+        query,
+        httpStatus: status || null,
+        cooldownSeconds,
+        apiError: error?.response?.data?.error || null
+      }, 'MovieBox search failed; falling back to SinhalaSub.');
+    }
+  }
+
+  // Independent fallback so members can keep requesting titles when MovieBox
+  // is rate-limited or unavailable. This returns listing/metadata only.
   const searchUrl = SITE_ORIGIN + '/?s=' + encodeURIComponent(query) + '&post_type=movies';
   const html = await fetchHtml(searchUrl);
   const $ = cheerio.load(html);
@@ -652,7 +689,7 @@ async function start() {
             : (error?.response?.data || null)
         }, 'Could not process movie request.');
         await sock.sendMessage(message.key.remoteJid, {
-          text: '⚠️ Movie search failed. ' + (movieBoxEnabled ? 'MovieBox API may be unavailable or its secret/configuration may be incorrect.' : 'SinhalaSub may be temporarily unavailable.') + ' Please try again later.'
+          text: '⚠️ Movie search failed. ' + (movieBoxEnabled ? 'MovieBox and the SinhalaSub fallback may both be temporarily unavailable.' : 'SinhalaSub may be temporarily unavailable.') + ' Please try again later.'
         }).catch(() => {});
       }
     }
