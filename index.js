@@ -15,7 +15,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const AUTH_DIR = path.join(__dirname, 'auth_info');
 const REQUEST_GROUP_JID = (process.env.REQUEST_GROUP_JID || '').trim();
 const MOVIE_GROUP_JID = (process.env.MOVIE_GROUP_JID || '').trim();
-const MOVIEBOX_API_URL = (process.env.MOVIEBOX_API_URL || '').trim().replace(/\\/+$/, '');
+const MOVIEBOX_API_URL = (process.env.MOVIEBOX_API_URL || '').trim().replace(/\/+$/, '');
 const MOVIEBOX_SECRET = (process.env.MOVIEBOX_SECRET || '').trim();
 const movieBoxEnabled = Boolean(MOVIEBOX_API_URL && MOVIEBOX_SECRET);
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
@@ -255,7 +255,7 @@ async function getMovieMetadata(movie) {
       language: safeText(movie.language),
       duration: safeText(movie.duration),
       imdb: safeText(movie.rating),
-      genres: movie.genre ? movie.genre.split(/\\s*,\\s*/).filter(Boolean) : [],
+      genres: movie.genre ? movie.genre.split(/\s*,\s*/).filter(Boolean) : [],
       directors: [],
       stars: [],
       thumbnail: movie.poster || ''
@@ -360,7 +360,7 @@ function makeResultsText(query, movies) {
     if (movie.language) lines.push('   🌐 Language: ' + movie.language);
     if (movie.quality) lines.push('   🎞️ Quality: ' + movie.quality);
     if (movie.format) lines.push('   📦 Format: ' + movie.format);
-    if (movie.releaseDate) lines.push('   📅 Year: ' + (movie.releaseDate.match(/\\d{4}/)?.[0] || movie.releaseDate));
+    if (movie.releaseDate) lines.push('   📅 Year: ' + (movie.releaseDate.match(/\d{4}/)?.[0] || movie.releaseDate));
     if (movie.provider === 'moviebox' && movie.rating) lines.push('   ⭐ Rating: ' + movie.rating);
   });
 
