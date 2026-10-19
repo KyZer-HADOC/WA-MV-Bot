@@ -526,12 +526,21 @@ async function start() {
   });
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    logger.info({ eventType: type, count: messages?.length || 0 }, 'WhatsApp message event received');
     if (type !== 'notify') return;
 
     for (const message of messages) {
       try {
         const jid = message.key?.remoteJid;
-        if (!jid || !isGroupJid(jid) || message.key.fromMe) continue;
+        if (!jid || !isGroupJid(jid)) continue;
+
+        logger.info({
+          jid,
+          fromMe: Boolean(message.key.fromMe),
+          hasMessage: Boolean(message.message)
+        }, 'GROUP MESSAGE RECEIVED');
+
+        if (message.key.fromMe) continue;
 
         if (!REQUEST_GROUP_JID || !MOVIE_GROUP_JID) {
           if (!loggedGroupJids.has(jid)) {
@@ -541,7 +550,10 @@ async function start() {
           continue;
         }
 
-        if (jid !== REQUEST_GROUP_JID) continue;
+        if (jid !== REQUEST_GROUP_JID) {
+          logger.info({ jid, expectedRequestGroupJid: REQUEST_GROUP_JID }, 'Ignoring non-request group');
+          continue;
+        }
 
         const content = unwrapMessage(message.message);
         const text = textFromMessage(content);
@@ -563,7 +575,9 @@ async function start() {
 
         activeSearchChats.add(jid);
         try {
+          logger.info({ query: text, provider: movieBoxEnabled ? 'moviebox' : 'sinhalasub' }, 'Starting movie search');
           const movies = await searchMovies(text);
+          logger.info({ provider: movieBoxEnabled ? 'moviebox' : 'sinhalasub', resultCount: movies.length }, 'Movie search completed');
           if (!movies.length) {
             await sock.sendMessage(jid, {
               text: '😕 No matching titles were found for “' + text + '”. Try the English title or include the release year.'
