@@ -48,6 +48,13 @@ const MOVIEBOX_SECRET = (process.env.MOVIEBOX_SECRET || '').trim();
 const movieBoxEnabled = Boolean(MOVIEBOX_API_URL && MOVIEBOX_SECRET);
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
+logger.info({
+  movieBoxApiUrl: JSON.stringify(MOVIEBOX_API_URL),
+  hasMovieBoxSecret: Boolean(MOVIEBOX_SECRET),
+  requestGroupConfigured: Boolean(REQUEST_GROUP_JID),
+  movieGroupConfigured: Boolean(MOVIE_GROUP_JID)
+}, 'Startup configuration check');
+
 const pendingSearches = new Map();
 const activeSearchChats = new Set();
 const loggedGroupJids = new Set();
