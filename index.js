@@ -3,6 +3,34 @@ import axios from 'axios';
 import qrcode from 'qrcode-terminal';
 import * as cheerio from 'cheerio';
 import pino from 'pino';
+
+// Quiet only the repetitive Baileys/libsignal Bad MAC stack spam so the bot's
+// own diagnostic logs remain readable. This does not repair failed decryption.
+function consoleArgsToText(args) {
+  return args.map((value) => {
+    if (value instanceof Error) return value.stack || value.message;
+    if (typeof value === 'string') return value;
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }).join(' ');
+}
+
+for (const method of ['error', 'warn', 'log']) {
+  const original = console[method].bind(console);
+  console[method] = (...args) => {
+    const output = consoleArgsToText(args);
+    const isRepeatedBadMacNoise =
+      /Failed to decrypt message with any known session/i.test(output) ||
+      /Session error:\s*Error:\s*Bad MAC/i.test(output) ||
+      (/Error:\s*Bad MAC/i.test(output) &&
+        /libsignal[\\/]src[\\/](?:crypto|session_cipher)\.js/i.test(output));
+    if (isRepeatedBadMacNoise) return;
+    original(...args);
+  };
+}
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import makeWASocket, {
