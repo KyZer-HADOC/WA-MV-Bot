@@ -15,6 +15,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const AUTH_DIR = path.join(__dirname, 'auth_info');
 const REQUEST_GROUP_JID = (process.env.REQUEST_GROUP_JID || '').trim();
 const MOVIE_GROUP_JID = (process.env.MOVIE_GROUP_JID || '').trim();
+const MOVIEBOX_API_URL = (process.env.MOVIEBOX_API_URL || '').trim().replace(/\\/+$/, '');
+const MOVIEBOX_SECRET = (process.env.MOVIEBOX_SECRET || '').trim();
+const movieBoxEnabled = Boolean(MOVIEBOX_API_URL && MOVIEBOX_SECRET);
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
 const pendingSearches = new Map();
@@ -125,7 +128,50 @@ function isSinhalaSubUrl(value) {
   }
 }
 
+async function searchMovieBox(query) {
+  let endpoint;
+  try {
+    endpoint = new URL(MOVIEBOX_API_URL);
+  } catch {
+    throw new Error('MOVIEBOX_API_URL is not a valid URL.');
+  }
+  if (endpoint.protocol !== 'https:') {
+    throw new Error('MOVIEBOX_API_URL must use HTTPS.');
+  }
+
+  const response = await axios.post(
+    MOVIEBOX_API_URL + '/search',
+    { keyword: query, page: 1, perPage: MAX_RESULTS },
+    {
+      headers: {
+        'X-Worker-Secret': MOVIEBOX_SECRET,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
+      timeout: 25000,
+      maxContentLength: 2 * 1024 * 1024
+    }
+  );
+
+  const items = Array.isArray(response.data?.items) ? response.data.items : [];
+  return items.slice(0, MAX_RESULTS).map(item => ({
+    provider: 'moviebox',
+    subjectId: String(item.subjectId || ''),
+    subjectType: item.subjectType,
+    title: safeText(item.title, ''),
+    poster: absoluteHttpUrl(item.poster, MOVIEBOX_API_URL),
+    language: safeText(item.language, ''),
+    duration: safeText(item.duration, ''),
+    releaseDate: safeText(item.releaseDate, ''),
+    rating: item.rating == null ? '' : String(item.rating),
+    genre: safeText(item.genre, ''),
+    country: safeText(item.country, ''),
+    type: safeText(item.type, '')
+  })).filter(item => item.title && item.subjectId);
+}
+
 async function searchMovies(query) {
+  if (movieBoxEnabled) return searchMovieBox(query);
   const searchUrl = SITE_ORIGIN + '/?s=' + encodeURIComponent(query) + '&post_type=movies';
   const html = await fetchHtml(searchUrl);
   const $ = cheerio.load(html);
@@ -203,6 +249,19 @@ async function searchMovies(query) {
 }
 
 async function getMovieMetadata(movie) {
+  if (movie.provider === 'moviebox') {
+    return {
+      title: safeText(movie.title),
+      language: safeText(movie.language),
+      duration: safeText(movie.duration),
+      imdb: safeText(movie.rating),
+      genres: movie.genre ? movie.genre.split(/\\s*,\\s*/).filter(Boolean) : [],
+      directors: [],
+      stars: [],
+      thumbnail: movie.poster || ''
+    };
+  }
+
   const html = await fetchHtml(movie.movieUrl);
   const $ = cheerio.load(html);
   const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
@@ -288,8 +347,9 @@ async function getMovieMetadata(movie) {
 }
 
 function makeResultsText(query, movies) {
+  const providerTitle = movies[0]?.provider === 'moviebox' ? 'MOVIEBOX SEARCH' : 'SINHALASUB MOVIE SEARCH';
   const lines = [
-    '🎬 *SINHALASUB MOVIE SEARCH*',
+    '🎬 *' + providerTitle + '*',
     '',
     '🔎 Search: ' + query,
     ''
@@ -300,6 +360,8 @@ function makeResultsText(query, movies) {
     if (movie.language) lines.push('   🌐 Language: ' + movie.language);
     if (movie.quality) lines.push('   🎞️ Quality: ' + movie.quality);
     if (movie.format) lines.push('   📦 Format: ' + movie.format);
+    if (movie.releaseDate) lines.push('   📅 Year: ' + (movie.releaseDate.match(/\\d{4}/)?.[0] || movie.releaseDate));
+    if (movie.provider === 'moviebox' && movie.rating) lines.push('   ⭐ Rating: ' + movie.rating);
   });
 
   lines.push('', '↩️ *Reply to THIS bot message with a number* (example: 2).');
@@ -313,12 +375,12 @@ function formatDetails(movie, metadata) {
     '',
     '🌐 *Language:* ' + metadata.language,
     '⏱️ *Duration:* ' + metadata.duration,
-    '⭐ *IMDb:* ' + metadata.imdb,
+    '⭐ *' + (movie.provider === 'moviebox' ? 'Rating' : 'IMDb') + ':* ' + metadata.imdb,
     '🎭 *Genres:* ' + (metadata.genres.length ? metadata.genres.join(', ') : 'Not listed'),
     '🎥 *Director(s):* ' + (metadata.directors.length ? metadata.directors.join(', ') : 'Not listed'),
     '🌟 *Cast:* ' + (metadata.stars.length ? metadata.stars.slice(0, 8).join(', ') : 'Not listed'),
     '',
-    '🔎 Source details are based on SinhalaSub.lk.'
+    '🔎 Source: ' + (movie.provider === 'moviebox' ? 'MovieBox API metadata.' : 'SinhalaSub.lk.')
   ];
   if (movie.quality) lines.splice(2, 0, '🎞️ *Listed quality:* ' + movie.quality);
   if (movie.format) lines.splice(3, 0, '📦 *Listed format:* ' + movie.format);
@@ -527,7 +589,7 @@ async function start() {
       } catch (error) {
         logger.error({ err: error?.message || String(error) }, 'Could not process movie request.');
         await sock.sendMessage(message.key.remoteJid, {
-          text: '⚠️ Movie search failed. SinhalaSub may be temporarily unavailable; please try again later.'
+          text: '⚠️ Movie search failed. ' + (movieBoxEnabled ? 'MovieBox API may be unavailable or its secret/configuration may be incorrect.' : 'SinhalaSub may be temporarily unavailable.') + ' Please try again later.'
         }).catch(() => {});
       }
     }
