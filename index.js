@@ -45,11 +45,15 @@ const MOVIE_GROUP_JID = (process.env.MOVIE_GROUP_JID || '').trim();
 const MOVIEBOX_API_URL = (process.env.MOVIEBOX_API_URL || '').trim().replace(/\/+$/, '');
 const MOVIEBOX_SECRET = (process.env.MOVIEBOX_SECRET || '').trim();
 const movieBoxEnabled = Boolean(MOVIEBOX_API_URL && MOVIEBOX_SECRET);
+const CHAMA_CINESUBZ_API_KEY = (process.env.CHAMA_CINESUBZ_API_KEY || '').trim();
+const CHAMA_CINESUBZ_BASE_URL = 'https://api.chamindu.site/api/v1/movies/cinesubz';
+const chamaCineSubzEnabled = Boolean(CHAMA_CINESUBZ_API_KEY);
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
 logger.info({
   movieBoxApiUrl: JSON.stringify(MOVIEBOX_API_URL),
   hasMovieBoxSecret: Boolean(MOVIEBOX_SECRET),
+  chamaCineSubzConfigured: chamaCineSubzEnabled,
   requestGroupConfigured: Boolean(REQUEST_GROUP_JID),
   movieGroupConfigured: Boolean(MOVIE_GROUP_JID)
 }, 'Startup configuration check');
@@ -183,6 +187,49 @@ async function searchMovieBox(query) {
   })).filter(item => item.title && item.subjectId);
 }
 
+
+async function searchCineSubz(query) {
+  const response = await axios.get(CHAMA_CINESUBZ_BASE_URL + '/search', {
+    params: { q: query, api_key: CHAMA_CINESUBZ_API_KEY },
+    headers: { Accept: 'application/json' },
+    timeout: 45000,
+    maxContentLength: 2 * 1024 * 1024
+  });
+
+  if (response.data?.status === false) {
+    throw new Error('Chama CineSubz search returned status=false.');
+  }
+
+  const items = Array.isArray(response.data?.data) ? response.data.data : [];
+  logger.info({
+    httpStatus: response.status,
+    rawItemCount: items.length
+  }, 'Chama CineSubz search response received');
+
+  return items.slice(0, MAX_RESULTS).map(item => {
+    const title = safeText(item.title, '');
+    const pageUrl = absoluteHttpUrl(item.link, 'https://cinesubz.net');
+    const year = title.match(/\b(?:18|19|20|21)\d{2}\b/)?.[0] || '';
+
+    return {
+      provider: 'cinesubz',
+      subjectId: pageUrl,
+      subjectType: safeText(item.type, ''),
+      title,
+      movieUrl: pageUrl,
+      poster: absoluteHttpUrl(item.image, 'https://cinesubz.net'),
+      language: '',
+      duration: '',
+      releaseDate: year,
+      rating: item.rating && item.rating !== 'N/A' ? String(item.rating) : '',
+      genre: '',
+      country: '',
+      type: safeText(item.type, ''),
+      quality: item.quality && item.quality !== 'N/A' ? String(item.quality) : ''
+    };
+  }).filter(item => item.title && item.subjectId);
+}
+
 async function searchWikipedia(query) {
   // Wikipedia's public MediaWiki REST API does not require an API key.
   const response = await axios.get('https://en.wikipedia.org/w/rest.php/v1/search/page', {
@@ -250,7 +297,7 @@ async function useWikipediaFallback(query, originalError = null) {
   }
 }
 
-async function searchMovies(query) {
+async function searchMovieBoxOrFallback(query) {
   if (!movieBoxEnabled) {
     return useWikipediaFallback(query, new Error('MovieBox API is not configured.'));
   }
@@ -294,7 +341,76 @@ async function searchMovies(query) {
   }
 }
 
+
+async function searchMovies(query) {
+  if (chamaCineSubzEnabled) {
+    try {
+      const results = await searchCineSubz(query);
+      if (results.length) return results;
+      logger.info({ query }, 'Chama CineSubz returned no matches; trying configured fallbacks.');
+    } catch (error) {
+      logger.warn({
+        httpStatus: error?.response?.status || null,
+        apiStatus: error?.response?.data?.status ?? null
+      }, 'Chama CineSubz search failed; trying configured fallbacks.');
+    }
+  }
+
+  return searchMovieBoxOrFallback(query);
+}
+
 async function getMovieMetadata(movie) {
+  if (movie.provider === 'cinesubz' && CHAMA_CINESUBZ_API_KEY) {
+    try {
+      const response = await axios.get(CHAMA_CINESUBZ_BASE_URL + '/infodl', {
+        params: {
+          q: movie.movieUrl || movie.subjectId,
+          api_key: CHAMA_CINESUBZ_API_KEY
+        },
+        headers: { Accept: 'application/json' },
+        timeout: 60000,
+        maxContentLength: 3 * 1024 * 1024
+      });
+
+      const data = response.data?.data;
+      if (response.data?.status !== true || !data || typeof data !== 'object') {
+        throw new Error('Chama CineSubz info response did not contain movie details.');
+      }
+
+      const genres = Array.isArray(data.genres)
+        ? data.genres.filter(value => value && !/^#|^webupdated$/i.test(String(value)))
+        : (typeof data.genres === 'string' ? data.genres.split(/\s*,\s*/).filter(Boolean) : []);
+      const cast = Array.isArray(data.cast)
+        ? data.cast.map(person => safeText(person?.name, '')).filter(Boolean)
+        : [];
+      const starValue = data.stars && data.stars !== 'N/A'
+        ? String(data.stars).split(/\s*,\s*/).filter(Boolean)
+        : cast;
+      const directorValue = data.directors || data.director || '';
+      const directors = Array.isArray(directorValue)
+        ? directorValue.map(value => safeText(value, '')).filter(Boolean)
+        : String(directorValue).split(/\s*,\s*/).map(value => value.trim()).filter(Boolean);
+
+      return {
+        title: safeText(data.title, movie.title),
+        language: safeText(data.language),
+        duration: safeText(data.duration),
+        imdb: safeText(data.imdb || data.rating),
+        genres,
+        directors,
+        stars: starValue,
+        thumbnail: absoluteHttpUrl(data.image || data.thumbnail || movie.poster, 'https://cinesubz.net'),
+        sourceUrl: absoluteHttpUrl(data.url || movie.movieUrl, 'https://cinesubz.net'),
+        story: safeText(data.story, '')
+      };
+    } catch (error) {
+      logger.warn({
+        httpStatus: error?.response?.status || null,
+        apiStatus: error?.response?.data?.status ?? null
+      }, 'Chama CineSubz info lookup failed; using search-result metadata.');
+    }
+  }
+
   return {
     title: safeText(movie.title),
     language: safeText(movie.language),
@@ -303,12 +419,18 @@ async function getMovieMetadata(movie) {
     genres: movie.genre ? movie.genre.split(/\s*,\s*/).filter(Boolean) : [],
     directors: [],
     stars: [],
-    thumbnail: movie.poster || ''
+    thumbnail: movie.poster || '',
+    sourceUrl: movie.movieUrl || '',
+    story: ''
   };
 }
 
 function makeResultsText(query, movies) {
-  const providerTitle = movies[0]?.provider === 'wikipedia' ? 'WIKIPEDIA MOVIE SEARCH' : 'MOVIEBOX SEARCH';
+  const providerTitle = movies[0]?.provider === 'wikipedia'
+    ? 'WIKIPEDIA MOVIE SEARCH'
+    : movies[0]?.provider === 'cinesubz'
+      ? 'CINESUBZ SEARCH'
+      : 'MOVIEBOX SEARCH';
   const lines = [
     '🎬 *' + providerTitle + '*',
     '',
@@ -341,8 +463,21 @@ function formatDetails(movie, metadata) {
     '🎥 *Director(s):* ' + (metadata.directors.length ? metadata.directors.join(', ') : 'Not listed'),
     '🌟 *Cast:* ' + (metadata.stars.length ? metadata.stars.slice(0, 8).join(', ') : 'Not listed'),
     '',
-    '🔎 Source: ' + (movie.provider === 'wikipedia' ? 'Wikipedia metadata (no API key required).' : 'MovieBox API metadata.')
+    '🔎 Source: ' + (
+      movie.provider === 'wikipedia'
+        ? 'Wikipedia metadata (no API key required).'
+        : movie.provider === 'cinesubz'
+          ? 'CineSubz via Chama API.'
+          : 'MovieBox API metadata.'
+    )
   ];
+  if (movie.provider === 'cinesubz' && (metadata.sourceUrl || movie.movieUrl)) {
+    lines.splice(lines.length - 1, 0, '🔗 *Source page:* ' + (metadata.sourceUrl || movie.movieUrl));
+  }
+  if (metadata.story && metadata.story !== 'Not listed') {
+    const story = metadata.story.slice(0, 600);
+    lines.splice(lines.length - 1, 0, '', '📝 *Story:* ' + story + (metadata.story.length > 600 ? '…' : ''));
+  }
   if (movie.quality) lines.splice(2, 0, '🎞️ *Listed quality:* ' + movie.quality);
   if (movie.format) lines.splice(3, 0, '📦 *Listed format:* ' + movie.format);
   return lines.join('\n');
@@ -536,9 +671,15 @@ async function start() {
 
         activeSearchChats.add(jid);
         try {
-          logger.info({ query: text, provider: 'moviebox' }, 'Starting movie search');
+          logger.info({
+            query: text,
+            provider: chamaCineSubzEnabled ? 'cinesubz' : (movieBoxEnabled ? 'moviebox' : 'wikipedia')
+          }, 'Starting movie search');
           const movies = await searchMovies(text);
-          logger.info({ provider: 'moviebox', resultCount: movies.length }, 'Movie search completed');
+          logger.info({
+            provider: movies[0]?.provider || 'none',
+            resultCount: movies.length
+          }, 'Movie search completed');
           if (!movies.length) {
             await sock.sendMessage(jid, {
               text: '😕 No matching titles were found for “' + text + '”. Try the English title or include the release year.'
