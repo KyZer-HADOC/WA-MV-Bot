@@ -111,7 +111,6 @@ function isGroupJid(jid) {
 
 function normalizeTitle(value) {
   return String(value || '')
-    .replace(/\s*(?:sinhala\s+subtitles?|sinhala\s+sub|සිංහල\s+උපසිරසි.*)$/iu, '')
     .toLocaleLowerCase()
     .normalize('NFKC')
     .replace(/[^\p{L}\p{N}]+/gu, ' ')
@@ -230,7 +229,7 @@ async function getMovieMetadata(movie) {
     language: safeText(movie.language),
     duration: safeText(movie.duration),
     imdb: safeText(movie.rating),
-    genres: movie.genre ? movie.genre.split(/\\s*,\\s*/).filter(Boolean) : [],
+    genres: movie.genre ? movie.genre.split(/\s*,\s*/).filter(Boolean) : [],
     directors: [],
     stars: [],
     thumbnail: movie.poster || ''
