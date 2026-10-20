@@ -44,14 +44,12 @@ const REQUEST_GROUP_JID = (process.env.REQUEST_GROUP_JID || '').trim();
 const MOVIE_GROUP_JID = (process.env.MOVIE_GROUP_JID || '').trim();
 const MOVIEBOX_API_URL = (process.env.MOVIEBOX_API_URL || '').trim().replace(/\/+$/, '');
 const MOVIEBOX_SECRET = (process.env.MOVIEBOX_SECRET || '').trim();
-const TMDB_API_KEY = (process.env.TMDB_API_KEY || '').trim();
 const movieBoxEnabled = Boolean(MOVIEBOX_API_URL && MOVIEBOX_SECRET);
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
 logger.info({
   movieBoxApiUrl: JSON.stringify(MOVIEBOX_API_URL),
   hasMovieBoxSecret: Boolean(MOVIEBOX_SECRET),
-  hasTMDBApiKey: Boolean(TMDB_API_KEY),
   requestGroupConfigured: Boolean(REQUEST_GROUP_JID),
   movieGroupConfigured: Boolean(MOVIE_GROUP_JID)
 }, 'Startup configuration check');
@@ -185,92 +183,89 @@ async function searchMovieBox(query) {
   })).filter(item => item.title && item.subjectId);
 }
 
-const TMDB_GENRES = {
-  28: 'Action', 12: 'Adventure', 16: 'Animation', 35: 'Comedy',
-  80: 'Crime', 99: 'Documentary', 18: 'Drama', 10751: 'Family',
-  14: 'Fantasy', 36: 'History', 27: 'Horror', 10402: 'Music',
-  9648: 'Mystery', 10749: 'Romance', 878: 'Science Fiction',
-  10770: 'TV Movie', 53: 'Thriller', 10752: 'War', 37: 'Western'
-};
-
-async function searchTMDB(query) {
-  if (!TMDB_API_KEY) {
-    throw new Error('TMDB_API_KEY is not configured. Add a TMDB API key in the KataBump environment to enable metadata fallback.');
-  }
-
-  const response = await axios.get('https://api.themoviedb.org/3/search/movie', {
-    params: {
-      api_key: TMDB_API_KEY,
-      query,
-      include_adult: false,
-      language: 'en-US',
-      page: 1
+async function searchWikipedia(query) {
+  // Wikipedia's public MediaWiki REST API does not require an API key.
+  const response = await axios.get('https://en.wikipedia.org/w/rest.php/v1/search/page', {
+    params: { q: query, limit: MAX_RESULTS },
+    headers: {
+      'Accept': 'application/json',
+      'User-Agent': 'WA-MV-Bot/1.0 (movie title metadata search)'
     },
-    timeout: 15000,
+    timeout: 20000,
     maxContentLength: 2 * 1024 * 1024
   });
 
-  const items = Array.isArray(response.data?.results) ? response.data.results : [];
+  const pages = Array.isArray(response.data?.pages) ? response.data.pages : [];
+  const likelyMoviePages = pages.filter(page => {
+    const text = [page.title || '', page.description || '', page.excerpt || ''].join(' ');
+    return /\\b(film|movie|motion picture|television film)\\b/i.test(text);
+  });
+  const selectedPages = (likelyMoviePages.length ? likelyMoviePages : pages).slice(0, MAX_RESULTS);
+
   logger.info({
     httpStatus: response.status,
-    resultCount: items.length,
-    totalResults: response.data?.total_results ?? null
-  }, 'TMDB metadata search completed');
+    resultCount: selectedPages.length,
+    totalResultsReturned: pages.length
+  }, 'Wikipedia metadata search completed');
 
-  return items.slice(0, MAX_RESULTS).map(item => ({
-    provider: 'tmdb',
-    subjectId: String(item.id || ''),
-    subjectType: 1,
-    title: safeText(item.title || item.original_title, ''),
-    poster: item.poster_path
-      ? 'https://image.tmdb.org/t/p/w500' + item.poster_path
-      : '',
-    language: safeText(item.original_language, ''),
-    duration: '',
-    releaseDate: safeText(item.release_date, ''),
-    rating: item.vote_average == null ? '' : String(item.vote_average),
-    genre: Array.isArray(item.genre_ids)
-      ? item.genre_ids.map(id => TMDB_GENRES[id]).filter(Boolean).join(', ')
-      : '',
-    country: '',
-    type: 'movie'
-  })).filter(item => item.title && item.subjectId);
+  return selectedPages.map(page => {
+    const pageText = [page.description || '', page.excerpt || ''].join(' ');
+    const year = pageText.match(/\\b(18|19|20)\\d{2}\\b/)?.[0] || '';
+    const title = safeText(page.title, '');
+
+    return {
+      provider: 'wikipedia',
+      subjectId: String(page.id || page.key || title),
+      subjectType: 1,
+      title,
+      poster: absoluteHttpUrl(page.thumbnail?.url || '', 'https://en.wikipedia.org'),
+      language: '',
+      duration: '',
+      releaseDate: year,
+      rating: '',
+      genre: '',
+      country: '',
+      type: 'movie',
+      sourceUrl: page.key
+        ? 'https://en.wikipedia.org/wiki/' + encodeURIComponent(page.key).replace(/%2F/gi, '/')
+        : ''
+    };
+  }).filter(item => item.title && item.subjectId);
 }
 
-async function useTMDBFallback(query, originalError = null) {
+async function useWikipediaFallback(query, originalError = null) {
   try {
-    const results = await searchTMDB(query);
+    const results = await searchWikipedia(query);
     if (results.length) {
-      logger.warn({ query }, 'Using TMDB because MovieBox search is unavailable.');
+      logger.warn({ query }, 'Using Wikipedia metadata because MovieBox search is unavailable.');
     }
     return results;
   } catch (fallbackError) {
     logger.error({
       query,
-      tmdbError: fallbackError?.message || String(fallbackError),
+      wikipediaError: fallbackError?.message || String(fallbackError),
       movieBoxError: originalError?.message || null
-    }, 'Both MovieBox and TMDB metadata search failed.');
-    if (originalError && !TMDB_API_KEY) throw originalError;
+    }, 'Both MovieBox and Wikipedia metadata search failed.');
     throw fallbackError;
   }
 }
 
 async function searchMovies(query) {
   if (!movieBoxEnabled) {
-    return useTMDBFallback(query, new Error('MovieBox API is not configured.'));
+    return useWikipediaFallback(query, new Error('MovieBox API is not configured.'));
   }
 
   if (Date.now() < movieBoxUnavailableUntil) {
     const remainingSeconds = Math.ceil((movieBoxUnavailableUntil - Date.now()) / 1000);
-    logger.warn({ remainingSeconds }, 'MovieBox is temporarily rate-limited; trying TMDB metadata search.');
-    return useTMDBFallback(query, new Error('MovieBox is temporarily rate-limited.'));
+    logger.warn({ remainingSeconds }, 'MovieBox is temporarily rate-limited; trying Wikipedia metadata search.');
+    return useWikipediaFallback(query, new Error('MovieBox is temporarily rate-limited.'));
   }
 
   try {
     const results = await searchMovieBox(query);
     if (results.length) return results;
-    logger.info({ query }, 'MovieBox returned no matching titles; trying TMDB.');
-    return useTMDBFallback(query, new Error('MovieBox returned no matching titles.'));
+    logger.info({ query }, 'MovieBox returned no matching titles; trying Wikipedia.');
+    return useWikipediaFallback(query, new Error('MovieBox returned no matching titles.'));
   } catch (error) {
     const status = Number(error?.response?.status || 0);
     const upstreamRetryAfter = Number(error?.response?.data?.retryAfterSeconds || 0);
@@ -293,9 +288,9 @@ async function searchMovies(query) {
       httpStatus: status || null,
       cooldownSeconds,
       apiError: error?.response?.data?.error || null
-    }, 'MovieBox search failed; trying TMDB metadata search.');
+    }, 'MovieBox search failed; trying Wikipedia metadata search.');
 
-    return useTMDBFallback(query, error);
+    return useWikipediaFallback(query, error);
   }
 }
 
@@ -313,7 +308,7 @@ async function getMovieMetadata(movie) {
 }
 
 function makeResultsText(query, movies) {
-  const providerTitle = movies[0]?.provider === 'tmdb' ? 'TMDB MOVIE SEARCH' : 'MOVIEBOX SEARCH';
+  const providerTitle = movies[0]?.provider === 'tmdb' ? 'Wikipedia MOVIE SEARCH' : 'MOVIEBOX SEARCH';
   const lines = [
     '🎬 *' + providerTitle + '*',
     '',
@@ -341,12 +336,12 @@ function formatDetails(movie, metadata) {
     '',
     '🌐 *Language:* ' + metadata.language,
     '⏱️ *Duration:* ' + metadata.duration,
-    '⭐ *' + (movie.provider === 'tmdb' ? 'TMDB Rating' : 'Rating') + ':* ' + metadata.imdb,
+    '⭐ *' + (movie.provider === 'tmdb' ? 'Wikipedia Rating' : 'Rating') + ':* ' + metadata.imdb,
     '🎭 *Genres:* ' + (metadata.genres.length ? metadata.genres.join(', ') : 'Not listed'),
     '🎥 *Director(s):* ' + (metadata.directors.length ? metadata.directors.join(', ') : 'Not listed'),
     '🌟 *Cast:* ' + (metadata.stars.length ? metadata.stars.slice(0, 8).join(', ') : 'Not listed'),
     '',
-    '🔎 Source: ' + (movie.provider === 'tmdb' ? 'The Movie Database (TMDB) metadata.' : 'MovieBox API metadata.')
+    '🔎 Source: ' + (movie.provider === 'tmdb' ? 'The Movie Database (Wikipedia) metadata.' : 'MovieBox API metadata.')
   ];
   if (movie.quality) lines.splice(2, 0, '🎞️ *Listed quality:* ' + movie.quality);
   if (movie.format) lines.splice(3, 0, '📦 *Listed format:* ' + movie.format);
@@ -575,7 +570,7 @@ async function start() {
             : (error?.response?.data || null)
         }, 'Could not process movie request.');
         await sock.sendMessage(message.key.remoteJid, {
-          text: '⚠️ Movie search failed. Check the logs; MovieBox may be rate-limited and TMDB fallback may need an API key.'
+          text: '⚠️ Movie search failed. Check the logs; MovieBox may be rate-limited and Wikipedia fallback may need an API key.'
         }).catch(() => {});
       }
     }
