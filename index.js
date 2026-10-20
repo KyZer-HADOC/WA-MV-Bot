@@ -676,8 +676,6 @@ async function start() {
           hasMessage: Boolean(message.message)
         }, 'GROUP MESSAGE RECEIVED');
 
-        if (message.key.fromMe) continue;
-
         if (!REQUEST_GROUP_JID || !MOVIE_GROUP_JID) {
           if (!loggedGroupJids.has(jid)) {
             loggedGroupJids.add(jid);
@@ -696,6 +694,18 @@ async function start() {
         if (!text) continue;
 
         const contextInfo = contextFromMessage(content);
+
+        // The connected WhatsApp account may itself post requests to the group.
+        // Permit ordinary title text and replies to the bot's numbered list,
+        // while ignoring the bot's own generated status/results to prevent loops.
+        if (message.key.fromMe) {
+          const isBotGeneratedText = /^(?:🎬|🔎|✅|⚠️|😕|⏳|⌛|ℹ️)/u.test(text.trim());
+          const isNumberedSelection = /^\d{1,2}$/.test(text) && Boolean(contextInfo?.stanzaId);
+          if (isBotGeneratedText || (!isNumberedSelection && (text.length < 2 || text.length > 100))) {
+            continue;
+          }
+        }
+
         const wasSelection = await handleSelection(sock, message, text, contextInfo);
         if (wasSelection) continue;
 
