@@ -31,6 +31,7 @@ for (const method of ['error', 'warn', 'log']) {
   };
 }
 import path from 'node:path';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import makeWASocket, {
   useMultiFileAuthState,
@@ -40,15 +41,38 @@ import makeWASocket, {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const AUTH_DIR = path.join(__dirname, 'auth_info');
-const REQUEST_GROUP_JID = (process.env.REQUEST_GROUP_JID || '').trim();
-const MOVIE_GROUP_JID = (process.env.MOVIE_GROUP_JID || '').trim();
-const MOVIEBOX_API_URL = (process.env.MOVIEBOX_API_URL || '').trim().replace(/\/+$/, '');
-const MOVIEBOX_SECRET = (process.env.MOVIEBOX_SECRET || '').trim();
+const CONFIG_PATH = path.join(__dirname, 'config.json');
+
+let fileConfig = {};
+try {
+  const parsed = JSON.parse(readFileSync(CONFIG_PATH, 'utf8'));
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    fileConfig = parsed;
+  } else {
+    console.warn('config.json must contain a JSON object; ignoring it.');
+  }
+} catch (error) {
+  if (error?.code !== 'ENOENT') {
+    console.warn('Could not read config.json; using environment variables only.');
+  }
+}
+
+// Environment variables (including a .env file) take precedence over config.json.
+// This lets hosts without an environment-variable editor use a private config.json.
+function setting(name, fallback = '') {
+  const value = process.env[name] || fileConfig[name] || fallback;
+  return typeof value === 'string' ? value.trim() : value;
+}
+
+const REQUEST_GROUP_JID = String(setting('REQUEST_GROUP_JID')).trim();
+const MOVIE_GROUP_JID = String(setting('MOVIE_GROUP_JID')).trim();
+const MOVIEBOX_API_URL = String(setting('MOVIEBOX_API_URL')).trim().replace(/\/+$/, '');
+const MOVIEBOX_SECRET = String(setting('MOVIEBOX_SECRET')).trim();
 const movieBoxEnabled = Boolean(MOVIEBOX_API_URL && MOVIEBOX_SECRET);
-const CHAMA_CINESUBZ_API_KEY = (process.env.CHAMA_CINESUBZ_API_KEY || '').trim();
+const CHAMA_CINESUBZ_API_KEY = String(setting('CHAMA_CINESUBZ_API_KEY')).trim();
 const CHAMA_CINESUBZ_BASE_URL = 'https://api.chamindu.site/api/v1/movies/cinesubz';
 const chamaCineSubzEnabled = Boolean(CHAMA_CINESUBZ_API_KEY);
-const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
+const logger = pino({ level: setting('LOG_LEVEL', 'info') });
 
 logger.info({
   movieBoxApiUrl: JSON.stringify(MOVIEBOX_API_URL),
@@ -68,10 +92,11 @@ let movieBoxUnavailableUntil = 0;
 
 let mediaMap = {};
 try {
-  mediaMap = JSON.parse(process.env.AUTHORIZED_MEDIA_MAP || '{}');
+  const rawMediaMap = process.env.AUTHORIZED_MEDIA_MAP || fileConfig.AUTHORIZED_MEDIA_MAP || {};
+  mediaMap = typeof rawMediaMap === 'string' ? JSON.parse(rawMediaMap || '{}') : rawMediaMap;
   if (!mediaMap || typeof mediaMap !== 'object' || Array.isArray(mediaMap)) mediaMap = {};
 } catch {
-  logger.warn('AUTHORIZED_MEDIA_MAP is invalid JSON; authorized media delivery is disabled.');
+  logger.warn('AUTHORIZED_MEDIA_MAP is invalid; authorized media delivery is disabled.');
   mediaMap = {};
 }
 
