@@ -152,7 +152,8 @@ async function searchMovieBox(query) {
         'Content-Type': 'application/json',
         'Accept': 'application/json'
       },
-      timeout: 25000,
+      // The Worker may need several upstream host attempts before it can return a result.
+      timeout: 90000,
       maxContentLength: 2 * 1024 * 1024
     }
   );
