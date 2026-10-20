@@ -15,14 +15,18 @@ A WhatsApp group movie-request bot. Members type a movie title as ordinary text 
 
 1. Use Node.js 20 or newer.
 2. Install dependencies with npm install.
-3. In your hosting service's environment variables, set REQUEST_GROUP_JID and MOVIE_GROUP_JID to the respective WhatsApp group JIDs ending in @g.us.
+3. Configure both WhatsApp group JIDs and the Chama API key using environment variables, a private .env file, or a private config.json file.
 4. Start the bot with npm start.
 5. Scan the QR code shown in the console using WhatsApp.
-6. Keep the auth_info folder persistent and private. Never commit or share it.
+6. Keep auth_info, .env, and config.json private. Never commit or share them.
+
+### Hosts without environment-variable settings
+
+Copy config.example.json to config.json and fill in your own values. Upload config.json to the bot's root folder on the host. The live config.json is excluded by .gitignore so a real API key should not be committed to a public repository. Environment variables and .env values take precedence over config.json.
 
 ## Chama CineSubz API
 
-Set CHAMA_CINESUBZ_API_KEY in the hosting provider's environment variables to the key from the Chama Developer Console. Keep the key private and do not place it in index.js or commit it to GitHub. When configured, CineSubz is the primary search source. The bot uses the Search endpoint for results and the Info endpoint for details; it does not forward the API's download-link list. Rotate the key if it was exposed in a URL, screenshot, log, or public message.
+Set CHAMA_CINESUBZ_API_KEY in the hosting provider's environment variables, private .env file, or config.json to the key from the Chama Developer Console. Keep the key private and do not place it in index.js or commit it to GitHub. When configured, CineSubz is the primary search source. The bot uses the Search endpoint for results and the Info endpoint for details; it does not forward the API's download-link list. Rotate the key if it was exposed in a URL, screenshot, log, or public message.
 
 ## MovieBox API (optional fallback)
 
@@ -48,7 +52,7 @@ If you do not know a group JID yet, leave one or both group variables empty and 
 ## Hosting and account notes
 
 - Chama API availability and usage limits depend on the provider. If Chama fails, the bot tries the configured MovieBox fallback and then Wikipedia metadata.
-- Keep the auth_info folder on persistent storage. An ephemeral filesystem may lose the WhatsApp session on restart/redeploy.
+- Keep the auth_info folder, .env, and config.json on persistent storage. An ephemeral filesystem may lose the WhatsApp session or private configuration on restart/redeploy.
 - Free hosting can sleep or enforce usage limits; 24/7 uptime is not guaranteed.
 - This uses unofficial WhatsApp Web automation through Baileys. WhatsApp may restrict accounts using unofficial automation. Using your personal WhatsApp number has risk; a separate number/account is safer when available.
 
