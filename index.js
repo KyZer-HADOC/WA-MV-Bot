@@ -168,7 +168,7 @@ async function searchMovieBox(query) {
     totalCount: response.data?.pager?.totalCount ?? null
   }, 'MovieBox API response received');
   return items.slice(0, MAX_RESULTS).map(item => ({
-    provider: item.provider === 'tmdb' ? 'tmdb' : 'moviebox',
+    provider: item.provider === 'wikipedia' ? 'wikipedia' : 'moviebox',
     subjectId: String(item.subjectId || ''),
     subjectType: item.subjectType,
     title: safeText(item.title, ''),
@@ -308,7 +308,7 @@ async function getMovieMetadata(movie) {
 }
 
 function makeResultsText(query, movies) {
-  const providerTitle = movies[0]?.provider === 'tmdb' ? 'Wikipedia MOVIE SEARCH' : 'MOVIEBOX SEARCH';
+  const providerTitle = movies[0]?.provider === 'wikipedia' ? 'WIKIPEDIA MOVIE SEARCH' : 'MOVIEBOX SEARCH';
   const lines = [
     '🎬 *' + providerTitle + '*',
     '',
@@ -336,12 +336,12 @@ function formatDetails(movie, metadata) {
     '',
     '🌐 *Language:* ' + metadata.language,
     '⏱️ *Duration:* ' + metadata.duration,
-    '⭐ *' + (movie.provider === 'tmdb' ? 'Wikipedia Rating' : 'Rating') + ':* ' + metadata.imdb,
+    '⭐ *' + (movie.provider === 'wikipedia' ? 'Wikipedia Rating' : 'Rating') + ':* ' + metadata.imdb,
     '🎭 *Genres:* ' + (metadata.genres.length ? metadata.genres.join(', ') : 'Not listed'),
     '🎥 *Director(s):* ' + (metadata.directors.length ? metadata.directors.join(', ') : 'Not listed'),
     '🌟 *Cast:* ' + (metadata.stars.length ? metadata.stars.slice(0, 8).join(', ') : 'Not listed'),
     '',
-    '🔎 Source: ' + (movie.provider === 'tmdb' ? 'The Movie Database (Wikipedia) metadata.' : 'MovieBox API metadata.')
+    '🔎 Source: ' + (movie.provider === 'wikipedia' ? 'Wikipedia metadata (no API key required).' : 'MovieBox API metadata.')
   ];
   if (movie.quality) lines.splice(2, 0, '🎞️ *Listed quality:* ' + movie.quality);
   if (movie.format) lines.splice(3, 0, '📦 *Listed format:* ' + movie.format);
@@ -570,7 +570,7 @@ async function start() {
             : (error?.response?.data || null)
         }, 'Could not process movie request.');
         await sock.sendMessage(message.key.remoteJid, {
-          text: '⚠️ Movie search failed. Check the logs; MovieBox may be rate-limited and Wikipedia fallback may need an API key.'
+          text: '⚠️ Movie search failed. Check the logs; MovieBox may be rate-limited and Wikipedia fallback failed or is temporarily unavailable.'
         }).catch(() => {});
       }
     }
