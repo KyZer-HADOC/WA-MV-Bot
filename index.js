@@ -58,14 +58,29 @@ try {
 }
 
 // Environment variables (including a .env file) take precedence over config.json.
-// This lets hosts without an environment-variable editor use a private config.json.
+// An explicitly blank .env value also overrides any old value in config.json.
 function setting(name, fallback = '') {
-  const value = process.env[name] || fileConfig[name] || fallback;
-  return typeof value === 'string' ? value.trim() : value;
+  const value = Object.prototype.hasOwnProperty.call(process.env, name)
+    ? process.env[name]
+    : (fileConfig[name] ?? fallback);
+  if (typeof value !== 'string') return value;
+  const cleaned = value.trim();
+  if (/^(YOUR_|PASTE_|PUT_YOUR_|CHANGE_ME|REPLACE_ME)/i.test(cleaned)) return '';
+  return cleaned;
 }
 
-const REQUEST_GROUP_JID = String(setting('REQUEST_GROUP_JID')).trim();
-const MOVIE_GROUP_JID = String(setting('MOVIE_GROUP_JID')).trim();
+function configuredGroupJid(name) {
+  const value = String(setting(name)).trim();
+  if (!value) return '';
+  if (!value.endsWith('@g.us')) {
+    console.warn(name + ' is not a WhatsApp group JID ending with @g.us; treating it as unset.');
+    return '';
+  }
+  return value;
+}
+
+const REQUEST_GROUP_JID = configuredGroupJid('REQUEST_GROUP_JID');
+const MOVIE_GROUP_JID = configuredGroupJid('MOVIE_GROUP_JID');
 const MOVIEBOX_API_URL = String(setting('MOVIEBOX_API_URL')).trim().replace(/\/+$/, '');
 const MOVIEBOX_SECRET = String(setting('MOVIEBOX_SECRET')).trim();
 const movieBoxEnabled = Boolean(MOVIEBOX_API_URL && MOVIEBOX_SECRET);
@@ -736,7 +751,7 @@ async function start() {
             : (error?.response?.data || null)
         }, 'Could not process movie request.');
         await sock.sendMessage(message.key.remoteJid, {
-          text: '⚠️ Movie search failed. Check the logs; MovieBox may be rate-limited and Wikipedia fallback failed or is temporarily unavailable.'
+          text: '⚠️ Movie search failed. Check the KataBump Console logs for the API error, then try again.'
         }).catch(() => {});
       }
     }
