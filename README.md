@@ -1,12 +1,12 @@
 # WA-MV-Bot
 
-A WhatsApp group movie-request bot. Members type a movie title as ordinary text in the configured request group; no command prefix is needed. The bot searches SinhalaSub.lk for matching entries and returns a numbered list. The original requester replies to the bot's list with a number, and the bot posts the selected title's details and poster to the destination movie group.
+A WhatsApp group movie-request bot. Members type a movie title as ordinary text in the configured request group; no command prefix is needed. When CHAMA_CINESUBZ_API_KEY is configured, the bot searches CineSubz through Chama's API and returns a numbered list. The original requester replies to the bot's list with a number, and the bot posts the selected title's details and poster to the destination movie group. Optional MovieBox and Wikipedia fallbacks remain available.
 
 ## Current behavior
 
-- Uses lightweight HTTP requests and HTML parsing to search SinhalaSub.lk, based on the selectors in the existing KyZer SinhalaSub plugin; no TMDB API key or browser download is required.
-- Shows title, language, listed quality/format, and numbered choices.
-- On selection, fetches the title page's metadata (language, duration, IMDb rating, genres, director(s), cast) and attempts to send the poster with the details to the destination group.
+- Uses Chama CineSubz Search and Info endpoints when CHAMA_CINESUBZ_API_KEY is configured.
+- Shows title, listed quality, year where available, and numbered choices.
+- On selection, fetches available metadata (language, duration, rating, genres, director(s), cast, and synopsis) and attempts to send the poster with the details to the destination group.
 - A numeric choice is accepted only as a reply to a current bot-generated list, and only from the person who requested that list.
 - An optional AUTHORIZED_MEDIA_MAP can send a direct HTTPS file URL that the operator owns or is authorized to distribute. The bot does not extract download links from SinhalaSub or third-party file hosts.
 - If the two group JIDs are not configured, the bot does not process requests; it logs group JIDs it observes so they can be configured privately.
@@ -20,9 +20,13 @@ A WhatsApp group movie-request bot. Members type a movie title as ordinary text 
 5. Scan the QR code shown in the console using WhatsApp.
 6. Keep the auth_info folder persistent and private. Never commit or share it.
 
-## MovieBox API (optional)
+## Chama CineSubz API
 
-To use your own Cloudflare MovieBox API worker for title search and metadata, set these two variables in the host's environment settings:
+Set CHAMA_CINESUBZ_API_KEY in the hosting provider's environment variables to the key from the Chama Developer Console. Keep the key private and do not place it in index.js or commit it to GitHub. When configured, CineSubz is the primary search source. The bot uses the Search endpoint for results and the Info endpoint for details; it does not forward the API's download-link list. Rotate the key if it was exposed in a URL, screenshot, log, or public message.
+
+## MovieBox API (optional fallback)
+
+To use your own Cloudflare MovieBox API worker as a fallback, set these two variables in the host's environment settings:
 
 - `MOVIEBOX_API_URL`: your Worker base URL, with no trailing slash and no `/search` suffix.
 - `MOVIEBOX_SECRET`: the same secret value configured in the Worker as `MOVIEBOX_SECRET`. Keep it private.
@@ -43,7 +47,7 @@ If you do not know a group JID yet, leave one or both group variables empty and 
 
 ## Hosting and account notes
 
-- The search uses Axios and Cheerio instead of a full browser to reduce memory and storage needs on free hosting. If SinhalaSub blocks HTTP requests or changes its HTML, the scraper may need updates.
+- Chama API availability and usage limits depend on the provider. If Chama fails, the bot tries the configured MovieBox fallback and then Wikipedia metadata.
 - Keep the auth_info folder on persistent storage. An ephemeral filesystem may lose the WhatsApp session on restart/redeploy.
 - Free hosting can sleep or enforce usage limits; 24/7 uptime is not guaranteed.
 - This uses unofficial WhatsApp Web automation through Baileys. WhatsApp may restrict accounts using unofficial automation. Using your personal WhatsApp number has risk; a separate number/account is safer when available.
