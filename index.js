@@ -85,7 +85,7 @@ logger.info({
 const pendingSearches = new Map();
 const activeSearchChats = new Set();
 const loggedGroupJids = new Set();
-const MAX_RESULTS = 8;
+const MAX_RESULTS = 15;
 const SEARCH_TTL_MS = 10 * 60 * 1000;
 // Temporary circuit breaker: avoid repeatedly calling an upstream API that returned 429.
 let movieBoxUnavailableUntil = 0;
