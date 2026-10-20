@@ -1,7 +1,6 @@
 import 'dotenv/config';
 import axios from 'axios';
 import qrcode from 'qrcode-terminal';
-import * as cheerio from 'cheerio';
 import pino from 'pino';
 
 // Quiet only the repetitive Baileys/libsignal Bad MAC stack spam so the bot's
@@ -124,44 +123,13 @@ function safeText(value, fallback = 'Not listed') {
   return cleaned || fallback;
 }
 
-const SITE_ORIGIN = 'https://sinhalasub.lk';
-const HTTP_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-  'Accept-Language': 'en-US,en;q=0.9,si;q=0.8',
-  'Cache-Control': 'no-cache'
-};
-
-async function fetchHtml(url) {
-  const response = await axios.get(url, {
-    headers: HTTP_HEADERS,
-    timeout: 25000,
-    maxRedirects: 5,
-    maxContentLength: 8 * 1024 * 1024,
-    responseType: 'text'
-  });
-  if (typeof response.data !== 'string') {
-    throw new Error('SinhalaSub returned a non-text response.');
-  }
-  return response.data;
-}
-
-function absoluteHttpUrl(value, baseUrl = SITE_ORIGIN) {
+function absoluteHttpUrl(value, baseUrl = MOVIEBOX_API_URL) {
   if (!value) return '';
   try {
     const url = new URL(value, baseUrl);
     return ['http:', 'https:'].includes(url.protocol) ? url.href : '';
   } catch {
     return '';
-  }
-}
-
-function isSinhalaSubUrl(value) {
-  try {
-    const host = new URL(value).hostname.toLowerCase();
-    return host === 'sinhalasub.lk' || host.endsWith('.sinhalasub.lk');
-  } catch {
-    return false;
   }
 }
 
@@ -216,218 +184,61 @@ async function searchMovieBox(query) {
 }
 
 async function searchMovies(query) {
-  if (movieBoxEnabled && Date.now() < movieBoxUnavailableUntil) {
+  if (!movieBoxEnabled) {
+    throw new Error('MovieBox API is not configured. Set MOVIEBOX_API_URL and MOVIEBOX_SECRET.');
+  }
+
+  if (Date.now() < movieBoxUnavailableUntil) {
     const remainingSeconds = Math.ceil((movieBoxUnavailableUntil - Date.now()) / 1000);
-    logger.warn({ remainingSeconds }, 'MovieBox is temporarily unavailable; using SinhalaSub fallback.');
-  } else if (movieBoxEnabled) {
-    try {
-      const movieBoxResults = await searchMovieBox(query);
-      if (movieBoxResults.length) return movieBoxResults;
-      logger.warn({ query }, 'MovieBox returned no results; trying SinhalaSub fallback.');
-    } catch (error) {
-      const status = Number(error?.response?.status || 0);
-      const upstreamRetryAfter = Number(error?.response?.data?.retryAfterSeconds || 0);
-      let cooldownSeconds = 0;
+    throw new Error('MovieBox is temporarily rate-limited. Retry in about ' + remainingSeconds + ' seconds.');
+  }
 
-      if (status === 429) {
-        cooldownSeconds = Math.max(60, Math.min(3600, upstreamRetryAfter || 300));
-      } else if ([502, 503, 504].includes(status)) {
-        cooldownSeconds = 60;
-      } else if (!status) {
-        cooldownSeconds = 30;
-      }
+  try {
+    const results = await searchMovieBox(query);
+    if (!results.length) logger.info({ query }, 'MovieBox returned no matching titles.');
+    return results;
+  } catch (error) {
+    const status = Number(error?.response?.status || 0);
+    const upstreamRetryAfter = Number(error?.response?.data?.retryAfterSeconds || 0);
+    let cooldownSeconds = 0;
 
-      if (cooldownSeconds > 0) {
-        movieBoxUnavailableUntil = Date.now() + cooldownSeconds * 1000;
-      }
-
-      logger.warn({
-        query,
-        httpStatus: status || null,
-        cooldownSeconds,
-        apiError: error?.response?.data?.error || null
-      }, 'MovieBox search failed; falling back to SinhalaSub.');
+    if (status === 429) {
+      cooldownSeconds = Math.max(60, Math.min(3600, upstreamRetryAfter || 300));
+    } else if ([502, 503, 504].includes(status)) {
+      cooldownSeconds = 60;
+    } else if (!status) {
+      cooldownSeconds = 30;
     }
-  }
 
-  // Independent fallback so members can keep requesting titles when MovieBox
-  // is rate-limited or unavailable. This returns listing/metadata only.
-  const searchUrl = SITE_ORIGIN + '/?s=' + encodeURIComponent(query) + '&post_type=movies';
-  const html = await fetchHtml(searchUrl);
-  const $ = cheerio.load(html);
-  const results = [];
-  const seen = new Set();
-
-  const cardSelectors = [
-    '.display-item .item-box',
-    '.item-box',
-    '.movie-item',
-    'article'
-  ];
-  let cards = [];
-  for (const selector of cardSelectors) {
-    const matches = $(selector).toArray();
-    if (matches.length) {
-      cards = matches;
-      break;
+    if (cooldownSeconds > 0) {
+      movieBoxUnavailableUntil = Date.now() + cooldownSeconds * 1000;
     }
+
+    logger.warn({
+      query,
+      httpStatus: status || null,
+      cooldownSeconds,
+      apiError: error?.response?.data?.error || null
+    }, 'MovieBox search failed.');
+    throw error;
   }
-
-  const pushCard = (box, anchor) => {
-    const $box = $(box);
-    const $anchor = $(anchor);
-    const href = absoluteHttpUrl($anchor.attr('href'), searchUrl);
-    if (!href || !isSinhalaSubUrl(href) || seen.has(href)) return;
-    if (new URL(href).pathname === '/' || href.split('#')[0] === searchUrl) return;
-
-    const $image = $box.find('img, .thumb').first();
-    const title = safeText(
-      $anchor.attr('title') ||
-      $box.find('h1, h2, h3, .title, .movie-title').first().text() ||
-      $image.attr('alt') ||
-      $anchor.text(),
-      ''
-    );
-    if (!title || title.length < 2) return;
-
-    const language = safeText($box.find('.item-desc-giha .language, .language, [class*="language"]').first().text(), '');
-    const quality = safeText($box.find('.item-desc-giha .quality, .quality, [class*="quality"]').first().text(), '');
-    const format = safeText($box.find('.item-desc-giha .qty, .qty, [class*="qty"]').first().text(), '');
-    const poster = absoluteHttpUrl(
-      $image.attr('data-src') || $image.attr('data-lazy-src') || $image.attr('src') || '',
-      searchUrl
-    );
-
-    seen.add(href);
-    results.push({ title, movieUrl: href, poster, language, quality, format });
-  };
-
-  for (const box of cards) {
-    const anchors = $(box).find('a[href]').toArray();
-    if (!anchors.length) continue;
-    const anchor = anchors.find(a => $(a).attr('title') && isSinhalaSubUrl(absoluteHttpUrl($(a).attr('href'), searchUrl)))
-      || anchors.find(a => $(a).find('img').length && isSinhalaSubUrl(absoluteHttpUrl($(a).attr('href'), searchUrl)))
-      || anchors.find(a => isSinhalaSubUrl(absoluteHttpUrl($(a).attr('href'), searchUrl)));
-    if (anchor) pushCard(box, anchor);
-    if (results.length >= MAX_RESULTS) break;
-  }
-
-  // Fallback if the site's result cards changed but still contain title links and thumbnails.
-  if (!results.length) {
-    const anchors = $('a[href]').toArray().filter(anchor => {
-      const href = absoluteHttpUrl($(anchor).attr('href'), searchUrl);
-      return href && isSinhalaSubUrl(href) &&
-        (Boolean($(anchor).attr('title')) || $(anchor).find('img').length > 0);
-    });
-    for (const anchor of anchors) {
-      pushCard($(anchor).closest('article, li, .item-box, .movie-item, .display-item').get(0) || anchor, anchor);
-      if (results.length >= MAX_RESULTS) break;
-    }
-  }
-
-  return results.slice(0, MAX_RESULTS);
 }
 
 async function getMovieMetadata(movie) {
-  if (movie.provider === 'moviebox') {
-    return {
-      title: safeText(movie.title),
-      language: safeText(movie.language),
-      duration: safeText(movie.duration),
-      imdb: safeText(movie.rating),
-      genres: movie.genre ? movie.genre.split(/\s*,\s*/).filter(Boolean) : [],
-      directors: [],
-      stars: [],
-      thumbnail: movie.poster || ''
-    };
-  }
-
-  const html = await fetchHtml(movie.movieUrl);
-  const $ = cheerio.load(html);
-  const clean = value => String(value || '').replace(/\s+/g, ' ').trim();
-  const firstText = selectors => {
-    for (const selector of selectors) {
-      const value = clean($(selector).first().text());
-      if (value) return value;
-    }
-    return '';
-  };
-  const listText = selectors => {
-    for (const selector of selectors) {
-      const values = [...new Set($(selector).toArray().map(el => clean($(el).text())).filter(Boolean))];
-      if (values.length) return values;
-    }
-    return [];
-  };
-  const lineValue = labels => {
-    const lines = $('body').text().split(/\r?\n/).map(line => clean(line)).filter(Boolean);
-    for (const line of lines) {
-      for (const label of labels) {
-        const match = line.match(new RegExp('^' + label + '\\s*:\\s*(.*)$', 'i'));
-        if (match) return clean(match[1]);
-      }
-    }
-    return '';
-  };
-
-  const title = firstText([
-    '.info-details .details-title h3',
-    '.details-title h3',
-    'h1.entry-title',
-    'main h1',
-    'h1'
-  ]) || $('meta[property="og:title"]').attr('content') || $('title').text();
-
-  const imdbRaw = firstText([
-    '.info-details .data-imdb',
-    '.data-imdb',
-    '[itemprop="ratingValue"]'
-  ]) || lineValue(['IMDb(?: Rating)?']);
-
-  const thumbnailRaw =
-    $('.splash-bg img').first().attr('data-src') ||
-    $('.splash-bg img').first().attr('data-lazy-src') ||
-    $('.splash-bg img').first().attr('src') ||
-    $('.info-details img').first().attr('data-src') ||
-    $('.info-details img').first().attr('src') ||
-    $('meta[property="og:image"]').attr('content') ||
-    movie.poster ||
-    '';
-
-  let language = '';
-  let duration = '';
-  let directors = [];
-  let stars = [];
-
-  $('.info-col p, .info-details p, .movie-info p').each((_, element) => {
-    const $p = $(element);
-    const $strong = $p.find('strong, b').first();
-    const label = clean($strong.text());
-    const wholeText = clean($p.text());
-    const value = clean(wholeText.replace(label, '').replace(/^:\s*/, ''));
-
-    if (/language/i.test(label)) language = value;
-    if (/duration|runtime/i.test(label)) duration = value;
-    if (/director/i.test(label)) directors = $p.find('a').toArray().map(a => clean($(a).text())).filter(Boolean);
-    if (/stars|cast|starring/i.test(label)) stars = $p.find('a').toArray().map(a => clean($(a).text())).filter(Boolean);
-  });
-
-  const genres = listText(['.details-genre a', '.genres a', 'a[rel="tag"]']);
-
   return {
-    title: safeText(title, movie.title),
-    language: safeText(language || lineValue(['Language']), movie.language || 'Not listed'),
-    duration: safeText(duration || lineValue(['Duration', 'Runtime'])),
-    imdb: safeText(imdbRaw.replace(/IMDb(?: Rating)?\s*:?/i, '')),
-    genres,
-    directors: [...new Set(directors)],
-    stars: [...new Set(stars)],
-    thumbnail: absoluteHttpUrl(thumbnailRaw, movie.movieUrl) || movie.poster || ''
+    title: safeText(movie.title),
+    language: safeText(movie.language),
+    duration: safeText(movie.duration),
+    imdb: safeText(movie.rating),
+    genres: movie.genre ? movie.genre.split(/\\s*,\\s*/).filter(Boolean) : [],
+    directors: [],
+    stars: [],
+    thumbnail: movie.poster || ''
   };
 }
 
 function makeResultsText(query, movies) {
-  const providerTitle = movies[0]?.provider === 'moviebox' ? 'MOVIEBOX SEARCH' : 'SINHALASUB MOVIE SEARCH';
+  const providerTitle = 'MOVIEBOX SEARCH';
   const lines = [
     '🎬 *' + providerTitle + '*',
     '',
@@ -455,12 +266,12 @@ function formatDetails(movie, metadata) {
     '',
     '🌐 *Language:* ' + metadata.language,
     '⏱️ *Duration:* ' + metadata.duration,
-    '⭐ *' + (movie.provider === 'moviebox' ? 'Rating' : 'IMDb') + ':* ' + metadata.imdb,
+    '⭐ *Rating:* ' + metadata.imdb,
     '🎭 *Genres:* ' + (metadata.genres.length ? metadata.genres.join(', ') : 'Not listed'),
     '🎥 *Director(s):* ' + (metadata.directors.length ? metadata.directors.join(', ') : 'Not listed'),
     '🌟 *Cast:* ' + (metadata.stars.length ? metadata.stars.slice(0, 8).join(', ') : 'Not listed'),
     '',
-    '🔎 Source: ' + (movie.provider === 'moviebox' ? 'MovieBox API metadata.' : 'SinhalaSub.lk.')
+    '🔎 Source: MovieBox API metadata.'
   ];
   if (movie.quality) lines.splice(2, 0, '🎞️ *Listed quality:* ' + movie.quality);
   if (movie.format) lines.splice(3, 0, '📦 *Listed format:* ' + movie.format);
@@ -655,9 +466,9 @@ async function start() {
 
         activeSearchChats.add(jid);
         try {
-          logger.info({ query: text, provider: movieBoxEnabled ? 'moviebox' : 'sinhalasub' }, 'Starting movie search');
+          logger.info({ query: text, provider: 'moviebox' }, 'Starting movie search');
           const movies = await searchMovies(text);
-          logger.info({ provider: movieBoxEnabled ? 'moviebox' : 'sinhalasub', resultCount: movies.length }, 'Movie search completed');
+          logger.info({ provider: 'moviebox', resultCount: movies.length }, 'Movie search completed');
           if (!movies.length) {
             await sock.sendMessage(jid, {
               text: '😕 No matching titles were found for “' + text + '”. Try the English title or include the release year.'
@@ -689,7 +500,7 @@ async function start() {
             : (error?.response?.data || null)
         }, 'Could not process movie request.');
         await sock.sendMessage(message.key.remoteJid, {
-          text: '⚠️ Movie search failed. ' + (movieBoxEnabled ? 'MovieBox and the SinhalaSub fallback may both be temporarily unavailable.' : 'SinhalaSub may be temporarily unavailable.') + ' Please try again later.'
+          text: '⚠️ MovieBox search failed or is temporarily unavailable. Please try again later.'
         }).catch(() => {});
       }
     }
