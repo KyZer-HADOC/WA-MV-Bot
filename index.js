@@ -474,14 +474,31 @@ async function start() {
   });
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    logger.info({
+      eventType: type,
+      messageCount: Array.isArray(messages) ? messages.length : 0
+    }, 'WhatsApp messages.upsert event received.');
+
     if (type !== 'notify') return;
 
     for (const message of messages) {
       try {
         const jid = message.key?.remoteJid;
-        if (!jid) continue;
+        if (!jid) {
+          logger.warn('Received a WhatsApp message event without remoteJid.');
+          continue;
+        }
 
         const isGroup = isGroupJid(jid);
+        const rawContent = unwrapMessage(message.message);
+        const messageType = Object.keys(rawContent || {}).join(',');
+        logger.info({
+          chatType: isGroup ? 'group' : (jid === 'status@broadcast' ? 'status' : 'direct'),
+          chatJid: jid,
+          fromMe: Boolean(message.key?.fromMe),
+          messageType: messageType || 'unknown'
+        }, 'Incoming WhatsApp message event.');
+
         if (isGroup && !loggedGroupJids.has(jid)) {
           loggedGroupJids.add(jid);
           logger.info({ groupJid: jid }, 'Observed WhatsApp group JID. Set REQUEST_GROUP_JID to enable requests in this group.');
@@ -489,11 +506,21 @@ async function start() {
         // Group requests only run in the configured request group. Direct messages
         // are supported independently, so a missing group configuration does not
         // silently disable private-chat searches.
-        if (isGroup && (!REQUEST_GROUP_JID || jid !== REQUEST_GROUP_JID)) continue;
+        if (isGroup && !REQUEST_GROUP_JID) {
+          logger.warn({ groupJid: jid }, 'Ignoring this group message because REQUEST_GROUP_JID is not configured.');
+          continue;
+        }
+        if (isGroup && jid !== REQUEST_GROUP_JID) {
+          logger.info({ groupJid: jid }, 'Ignoring message from a group that is not REQUEST_GROUP_JID.');
+          continue;
+        }
 
-        const content = unwrapMessage(message.message);
+        const content = rawContent;
         const text = textFromMessage(content);
-        if (!text) continue;
+        if (!text) {
+          logger.info({ messageType }, 'Message arrived but contains no supported text/caption; nothing to search.');
+          continue;
+        }
 
         const contextInfo = contextFromMessage(content);
         if (message.key.fromMe) {
