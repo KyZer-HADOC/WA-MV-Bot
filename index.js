@@ -17,6 +17,7 @@ function consoleArgsToText(args) {
   }).join(' ');
 }
 
+let lastMessageCounterWarningAt = 0;
 for (const method of ['error', 'warn', 'log']) {
   const original = console[method].bind(console);
   console[method] = (...args) => {
@@ -27,6 +28,20 @@ for (const method of ['error', 'warn', 'log']) {
       (/Error:\s*Bad MAC/i.test(output) &&
         /libsignal[\\/]src[\\/](?:crypto|session_cipher)\.js/i.test(output));
     if (isRepeatedBadMacNoise) return;
+
+    // libsignal can print a complete SessionEntry, including transient key buffers.
+    // Avoid leaking those internals in Codespaces logs.
+    if (/Closing (?:open )?session in favor of incoming prekey bundle|Closing session:\s*SessionEntry/i.test(output)) return;
+
+    // Surface the condition once per minute without repeatedly dumping a stack trace.
+    if (/MessageCounterError:\s*Key used already or never filled/i.test(output)) {
+      const now = Date.now();
+      if (now - lastMessageCounterWarningAt > 60_000) {
+        lastMessageCounterWarningAt = now;
+        original('[WA-MV-Bot] WhatsApp could not decrypt a duplicate/out-of-order encrypted message. This may affect that message, but does not by itself mean the bot is disconnected.');
+      }
+      return;
+    }
     original(...args);
   };
 }
@@ -143,6 +158,35 @@ function contextFromMessage(message) {
 
 function isGroupJid(jid) {
   return typeof jid === 'string' && jid.endsWith('@g.us');
+}
+
+function normalizeUserJid(jid) {
+  if (typeof jid !== 'string' || !jid.trim()) return '';
+  const cleaned = jid.trim().replace(/:\\d+(?=@)/, '');
+  if (isGroupJid(cleaned) || cleaned === 'status@broadcast' || cleaned.endsWith('@broadcast')) return '';
+  return cleaned;
+}
+
+function requesterJidFromMessage(sock, message) {
+  const key = message?.key || {};
+  const remoteJid = key.remoteJid || '';
+
+  // In a group, fromMe messages frequently have no participant field.
+  // Use the logged-in WhatsApp identity instead of accidentally mentioning
+  // the group JID itself.
+  if (isGroupJid(remoteJid)) {
+    const candidates = key.fromMe
+      ? [sock.user?.id, sock.user?.lid, key.participantAlt, key.participant]
+      : [key.participantPn, key.participantAlt, key.participant, message?.participant];
+    for (const candidate of candidates) {
+      const normalized = normalizeUserJid(candidate);
+      if (normalized) return normalized;
+    }
+    return '';
+  }
+
+  return normalizeUserJid(remoteJid) || normalizeUserJid(key.participantPn) ||
+    normalizeUserJid(key.participantAlt) || normalizeUserJid(key.participant);
 }
 
 function safeText(value, fallback = 'Not listed') {
@@ -542,8 +586,8 @@ async function handleSelection(sock, message, text, contextInfo) {
     return true;
   }
 
-  const senderJid = message.key.participant || message.key.remoteJid;
-  if (search.requesterJid && search.requesterJid !== senderJid) {
+  const senderJid = requesterJidFromMessage(sock, message);
+  if (search.requesterJid && senderJid && search.requesterJid !== senderJid) {
     await sock.sendMessage(message.key.remoteJid, {
       text: '⚠️ Only the person who made this movie request can select a result.'
     }, { quoted: message });
@@ -564,7 +608,7 @@ async function handleSelection(sock, message, text, contextInfo) {
   const metadata = await getMovieMetadata(movie);
   const details = formatDetails(movie, metadata);
   const destinationJid = MOVIE_GROUP_JID || message.key.remoteJid;
-  const requesterJid = search.requesterJid || senderJid;
+  const requesterJid = search.requesterJid || senderJid || '';
   const requesterMention = requesterJid
     ? '\n\n👤 Requested by @' + requesterJid.split('@')[0].split(':')[0]
     : '';
@@ -836,7 +880,7 @@ async function start() {
 
           pendingSearches.set(resultMessage.key.id, {
             movies,
-            requesterJid: message.key.participant || message.key.remoteJid,
+            requesterJid: requesterJidFromMessage(sock, message),
             expiresAt: Date.now() + SEARCH_TTL_MS
           });
         } finally {
