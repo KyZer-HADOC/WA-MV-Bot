@@ -179,6 +179,12 @@ function refundDailyMovieRequest(userJid, day) {
   saveDailyUsageStore();
 }
 
+logger.info({
+  dailyMovieLimit: DAILY_MOVIE_LIMIT,
+  resetTimeZone: DAILY_LIMIT_TIME_ZONE,
+  usageStore: DAILY_LIMITS_PATH
+}, 'Per-user daily movie limit enabled.');
+
 const pendingSearches = new Map();
 const activeSearchChats = new Set();
 const loggedGroupJids = new Set();
@@ -903,7 +909,7 @@ async function start() {
 
         const contextInfo = contextFromMessage(content);
         if (message.key.fromMe) {
-          const isBotGeneratedText = /^(?:🎬|🔎|✅|⚠️|😕|⏳|⌛|ℹ️)/u.test(text.trim());
+          const isBotGeneratedText = /^(?:🎬|🔎|✅|⚠️|😕|⏳|⌛|ℹ️|⛔)/u.test(text.trim());
           const isNumberedSelection = /^\d{1,2}$/.test(text) && Boolean(contextInfo?.stanzaId);
           if (isBotGeneratedText || (!isNumberedSelection && (text.length < 2 || text.length > 100))) {
             continue;
