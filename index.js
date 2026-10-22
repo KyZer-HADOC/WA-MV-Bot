@@ -346,6 +346,14 @@ async function handleSelection(sock, message, text, contextInfo) {
     return true;
   }
 
+  const senderJid = message.key.participant || message.key.remoteJid;
+  if (search.requesterJid && search.requesterJid !== senderJid) {
+    await sock.sendMessage(message.key.remoteJid, {
+      text: '⚠️ Only the person who made this movie request can select a result.'
+    }, { quoted: message });
+    return true;
+  }
+
   if (!/^\d{1,2}$/.test(text)) return false;
   const index = Number(text) - 1;
   if (index < 0 || index >= search.movies.length) return true;
@@ -359,32 +367,40 @@ async function handleSelection(sock, message, text, contextInfo) {
 
   const metadata = await getMovieMetadata(movie);
   const details = formatDetails(movie, metadata);
+  const destinationJid = MOVIE_GROUP_JID || message.key.remoteJid;
 
   if (metadata.thumbnail) {
     try {
-      await sock.sendMessage(MOVIE_GROUP_JID, {
+      await sock.sendMessage(destinationJid, {
         image: { url: metadata.thumbnail },
         caption: details
       });
     } catch {
-      await sock.sendMessage(MOVIE_GROUP_JID, { text: details });
+      await sock.sendMessage(destinationJid, { text: details });
     }
   } else {
-    await sock.sendMessage(MOVIE_GROUP_JID, { text: details });
+    await sock.sendMessage(destinationJid, { text: details });
   }
 
   let mediaSent = false;
-  try {
-    mediaSent = await sendAutomaticCineSubzMedia(sock, metadata);
-  } catch (error) {
-    logger.error({ err: error.message }, 'Media delivery failed.');
+  if (MOVIE_GROUP_JID) {
+    try {
+      mediaSent = await sendAutomaticCineSubzMedia(sock, metadata);
+    } catch (error) {
+      logger.error({ err: error.message }, 'Media delivery failed.');
+    }
   }
 
-  await sock.sendMessage(message.key.remoteJid, {
-    text: mediaSent
+  const detailsSentToAnotherChat = destinationJid !== message.key.remoteJid;
+  let confirmation;
+  if (detailsSentToAnotherChat) {
+    confirmation = mediaSent
       ? '✅ *' + metadata.title + '* details, poster and video file sent to the Movie Group!'
-      : '✅ *' + metadata.title + '* details and poster sent, but video file could not be fetched.'
-  }, { quoted: message });
+      : '✅ *' + metadata.title + '* details and poster sent to the Movie Group.';
+  } else {
+    confirmation = '✅ *' + metadata.title + '* details and poster are shown in this chat.';
+  }
+  await sock.sendMessage(message.key.remoteJid, { text: confirmation }, { quoted: message });
 
   return true;
 }
@@ -463,9 +479,17 @@ async function start() {
     for (const message of messages) {
       try {
         const jid = message.key?.remoteJid;
-        if (!jid || !isGroupJid(jid)) continue;
-        if (!REQUEST_GROUP_JID || !MOVIE_GROUP_JID) continue;
-        if (jid !== REQUEST_GROUP_JID) continue;
+        if (!jid) continue;
+
+        const isGroup = isGroupJid(jid);
+        if (isGroup && !loggedGroupJids.has(jid)) {
+          loggedGroupJids.add(jid);
+          logger.info({ groupJid: jid }, 'Observed WhatsApp group JID. Set REQUEST_GROUP_JID to enable requests in this group.');
+        }
+        // Group requests only run in the configured request group. Direct messages
+        // are supported independently, so a missing group configuration does not
+        // silently disable private-chat searches.
+        if (isGroup && (!REQUEST_GROUP_JID || jid !== REQUEST_GROUP_JID)) continue;
 
         const content = unwrapMessage(message.message);
         const text = textFromMessage(content);
@@ -480,6 +504,12 @@ async function start() {
           }
         }
 
+        logger.info({
+          chatType: isGroup ? 'group' : 'direct',
+          chatJid: jid,
+          message: text.slice(0, 120)
+        }, 'Received incoming movie message.');
+
         const wasSelection = await handleSelection(sock, message, text, contextInfo);
         if (wasSelection) continue;
 
@@ -490,6 +520,15 @@ async function start() {
         activeSearchChats.add(jid);
 
         try {
+          if (!chamaCineSubzEnabled) {
+            logger.warn('Movie search skipped because CHAMA_CINESUBZ_API_KEY is not configured.');
+            await sock.sendMessage(jid, {
+              text: '⚠️ Movie search is not configured yet. Add your CHAMA_CINESUBZ_API_KEY in the private .env or config.json file, then restart the bot.'
+            }, { quoted: message });
+            continue;
+          }
+
+          logger.info({ query: text }, 'Searching CineSubz for movie title.');
           const movies = await searchMovies(text);
           if (!movies.length) {
             await sock.sendMessage(jid, {
