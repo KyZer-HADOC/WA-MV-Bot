@@ -1,0 +1,26 @@
+name: Run WA-MV-Bot
+
+on:
+  workflow_dispatch: # Actions tab eken manual start karanna puluwan wenna
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run WhatsApp Bot
+        env:
+          CHAMA_CINESUBZ_API_KEY: ${{ secrets.CHAMA_CINESUBZ_API_KEY }}
+          REQUEST_GROUP_JID: ${{ secrets.REQUEST_GROUP_JID }}
+          MOVIE_GROUP_JID: ${{ secrets.MOVIE_GROUP_JID }}
+        run: node index.js
