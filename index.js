@@ -238,7 +238,27 @@ async function getMovieMetadata(movie) {
         ? directorValue.map(value => safeText(value, '')).filter(Boolean)
         : String(directorValue).split(/\s*,\s*/).map(value => value.trim()).filter(Boolean);
 
-      const downloadLinks = data.downloads || data.links || data.dl_links || data.download_links || [];
+      // Do not use "||" here: an empty downloads array is truthy and would
+      // hide populated fields such as data.links or data.downloadLinks.
+      const downloadFields = [
+        'downloads', 'links', 'dl_links', 'download_links',
+        'downloadLinks', 'download', 'download_url', 'downloadUrl',
+        'direct_download', 'directDownload', 'media', 'files'
+      ];
+      const downloadLinks = downloadFields
+        .map(key => data[key])
+        .filter(value => value !== undefined && value !== null && value !== '');
+
+      const downloadFieldSummary = downloadFields
+        .filter(key => data[key] !== undefined && data[key] !== null && data[key] !== '')
+        .map(key => {
+          const value = data[key];
+          if (Array.isArray(value)) return { field: key, type: 'array', length: value.length };
+          if (value && typeof value === 'object') return { field: key, type: 'object', keys: Object.keys(value).slice(0, 20) };
+          if (typeof value === 'string') return { field: key, type: 'string', length: value.length, looksLikeUrl: /^https?:\\/\\//i.test(value.trim()) };
+          return { field: key, type: typeof value };
+        });
+      logger.info({ downloadFields: downloadFieldSummary }, 'Inspected CineSubz download response fields.');
 
       return {
         title: safeText(data.title, movie.title),
@@ -400,6 +420,12 @@ function extractMediaUrlCandidates(downloadLinks) {
 
 async function sendAutomaticCineSubzMedia(sock, metadata) {
   const candidates = extractMediaUrlCandidates(metadata.downloadLinks);
+  logger.info({
+    candidateCount: candidates.length,
+    candidateHosts: candidates.map(candidate => {
+      try { return new URL(candidate.url).host; } catch { return 'invalid-url'; }
+    })
+  }, 'Extracted candidate movie URLs from the API response.');
   let lastReason = 'the API did not return a direct HTTPS video URL';
 
   if (!candidates.length) {
