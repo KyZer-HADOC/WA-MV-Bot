@@ -68,3 +68,10 @@ This is the simplest $0 option. Download the repository ZIP from GitHub, extract
 If you do not know the group JIDs yet, leave the two variables blank, save `.env`, start the bot, and send a message in each of the two groups. Copy the `groupJid` values from the console into `REQUEST_GROUP_JID` and `MOVIE_GROUP_JID` in `.env`, then stop and restart the bot.
 
 The PC must remain switched on and connected to the internet while the bot is running. Disable Windows Sleep while plugged in, but keep the display free to turn off. Keep `.env` and `auth_info` private and never upload them to GitHub. This local option has no hosting bill, but it is not independent of your PC, electricity, or internet connection.
+
+## Automatic restart
+
+Run the bot with `npm start`. The watchdog launches `index.js` and automatically restarts the bot process after an unexpected exit, waiting 5 seconds by default. To change that delay, set `BOT_RESTART_DELAY_MS` (1000–60000 milliseconds). Use `npm run start:once` to run the bot directly for debugging. Press `Ctrl+C` to stop intentionally without restarting.
+
+**Hosting limitation:** this watchdog only works while the Codespace/container itself is running. It cannot wake a stopped, suspended, deleted, or timed-out GitHub Codespace; the Codespace must be started again by the user. GitHub Codespaces time/usage limits still apply, so this is not a 24/7 hosting guarantee.
+
