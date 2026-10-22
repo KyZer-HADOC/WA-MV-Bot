@@ -333,10 +333,17 @@ function formatDetails(movie, metadata) {
 
 async function inspectDirectMediaUrl(videoUrl) {
   let response;
+  let host = 'unknown';
+  try {
+    host = new URL(videoUrl).host;
+  } catch {}
+  const startedAt = Date.now();
+  logger.info({ host }, 'Checking candidate URL for direct video content.');
+
   try {
     response = await axios.get(videoUrl, {
       responseType: 'stream',
-      timeout: 25000,
+      timeout: 20000,
       maxRedirects: 8,
       headers: {
         Range: 'bytes=0-0',
@@ -351,6 +358,11 @@ async function inspectDirectMediaUrl(videoUrl) {
     const rangeTotal = Number(contentRange.match(/\/(\d+)$/)?.[1] || 0);
     const contentLength = Number(headers['content-length'] || 0);
     const totalBytes = rangeTotal || (response.status === 206 ? 0 : contentLength);
+    let finalHost = host;
+    try {
+      const finalUrl = response.request?.res?.responseUrl || response.config?.url;
+      if (finalUrl) finalHost = new URL(finalUrl).host;
+    } catch {}
     response.data?.on?.('error', () => {});
     response.data?.destroy?.();
 
@@ -359,12 +371,23 @@ async function inspectDirectMediaUrl(videoUrl) {
       contentType === 'application/octet-stream' ||
       contentType === 'binary/octet-stream';
 
+    const diagnostic = {
+      host,
+      finalHost,
+      status: response.status,
+      contentType: contentType || 'unknown',
+      totalBytes: totalBytes || null,
+      elapsedMs: Date.now() - startedAt
+    };
+    logger.info(diagnostic, 'Candidate URL header check completed.');
+
     if (!isMediaType) {
       return {
         ok: false,
         reason: 'URL returned ' + (contentType || 'unknown content type') + ', not a video file',
         contentType,
-        totalBytes
+        totalBytes,
+        finalHost
       };
     }
 
@@ -373,14 +396,17 @@ async function inspectDirectMediaUrl(videoUrl) {
         ok: false,
         reason: 'URL content is only ' + totalBytes + ' bytes, too small for a movie',
         contentType,
-        totalBytes
+        totalBytes,
+        finalHost
       };
     }
 
-    return { ok: true, contentType, totalBytes };
+    return { ok: true, contentType, totalBytes, finalHost };
   } catch (error) {
     response?.data?.on?.('error', () => {});
     response?.data?.destroy?.();
+    const elapsedMs = Date.now() - startedAt;
+    logger.warn({ host, elapsedMs, err: error?.message || String(error) }, 'Candidate URL header check failed.');
     return { ok: false, reason: 'Could not verify video URL: ' + (error?.message || String(error)) };
   }
 }
@@ -435,7 +461,13 @@ async function sendAutomaticCineSubzMedia(sock, metadata) {
 
   // Some APIs list several mirror/download pages. Check a few candidates so
   // one HTML page does not prevent a later direct video URL from being used.
-  for (const candidate of candidates) {
+  for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex += 1) {
+    const candidate = candidates[candidateIndex];
+    logger.info({
+      candidateNumber: candidateIndex + 1,
+      candidateCount: candidates.length,
+      host: (() => { try { return new URL(candidate.url).host; } catch { return 'invalid-url'; } })()
+    }, 'Testing movie download candidate.');
     const inspection = await inspectDirectMediaUrl(candidate.url);
     if (!inspection.ok) {
       lastReason = inspection.reason;
@@ -469,6 +501,7 @@ async function sendAutomaticCineSubzMedia(sock, metadata) {
         lastReason = 'WhatsApp upload failed: ' + (error?.message || String(error));
         logger.warn({
           attempt,
+          candidateNumber: candidateIndex + 1,
           host: (() => { try { return new URL(candidate.url).host; } catch { return 'unknown'; } })(),
           err: error?.message || String(error)
         }, 'Video upload attempt failed.');
