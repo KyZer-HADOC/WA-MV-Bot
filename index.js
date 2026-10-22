@@ -456,7 +456,7 @@ function extractMediaUrlCandidates(downloadLinks) {
   return found.slice(0, 10);
 }
 
-async function sendAutomaticCineSubzMedia(sock, metadata) {
+async function sendAutomaticCineSubzMedia(sock, metadata, requesterJid = '') {
   const candidates = extractMediaUrlCandidates(metadata.downloadLinks);
   logger.info({
     candidateCount: candidates.length,
@@ -501,7 +501,8 @@ async function sendAutomaticCineSubzMedia(sock, metadata) {
           document: { url: candidate.url },
           mimetype: 'video/mp4',
           fileName: filename,
-          caption: 'Any Movie Group'
+          caption: 'Any Movie Group' + (requesterJid ? '\nRequested by @' + requesterJid.split('@')[0].split(':')[0] : ''),
+          ...(requesterJid ? { mentions: [requesterJid] } : {})
         });
         logger.info({
           contentType: inspection.contentType || null,
@@ -563,24 +564,31 @@ async function handleSelection(sock, message, text, contextInfo) {
   const metadata = await getMovieMetadata(movie);
   const details = formatDetails(movie, metadata);
   const destinationJid = MOVIE_GROUP_JID || message.key.remoteJid;
+  const requesterJid = search.requesterJid || senderJid;
+  const requesterMention = requesterJid
+    ? '\n\n👤 Requested by @' + requesterJid.split('@')[0].split(':')[0]
+    : '';
+  const detailCaption = details + requesterMention;
+  const mentionOptions = requesterJid ? { mentions: [requesterJid] } : {};
 
   if (metadata.thumbnail) {
     try {
       await sock.sendMessage(destinationJid, {
         image: { url: metadata.thumbnail },
-        caption: details
+        caption: detailCaption,
+        ...mentionOptions
       });
     } catch {
-      await sock.sendMessage(destinationJid, { text: details });
+      await sock.sendMessage(destinationJid, { text: detailCaption, ...mentionOptions });
     }
   } else {
-    await sock.sendMessage(destinationJid, { text: details });
+    await sock.sendMessage(destinationJid, { text: detailCaption, ...mentionOptions });
   }
 
   let mediaResult = { sent: false, reason: MOVIE_GROUP_JID ? 'no verified video URL was available' : 'MOVIE_GROUP_JID is not configured', fallbackUrl: metadata.sourceUrl || '' };
   if (MOVIE_GROUP_JID) {
     try {
-      mediaResult = await sendAutomaticCineSubzMedia(sock, metadata);
+      mediaResult = await sendAutomaticCineSubzMedia(sock, metadata, requesterJid);
     } catch (error) {
       logger.error({ err: error.message }, 'Media delivery failed.');
       mediaResult = { sent: false, reason: error.message || 'media upload failed', fallbackUrl: metadata.sourceUrl || '' };
