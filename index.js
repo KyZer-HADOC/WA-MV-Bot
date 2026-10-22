@@ -884,18 +884,21 @@ async function start() {
           messageType: messageType || 'unknown'
         }, 'Incoming WhatsApp message event.');
 
-        if (isGroup && !loggedGroupJids.has(jid)) {
+        if (!isGroup) {
+          logger.info({ chatJid: jid }, 'Ignoring private/status message: movie requests are group-only.');
+          continue;
+        }
+
+        if (!loggedGroupJids.has(jid)) {
           loggedGroupJids.add(jid);
           logger.info({ groupJid: jid }, 'Observed WhatsApp group JID. Set REQUEST_GROUP_JID to enable requests in this group.');
         }
-        // Group requests only run in the configured request group. Direct messages
-        // are supported independently, so a missing group configuration does not
-        // silently disable private-chat searches.
-        if (isGroup && !REQUEST_GROUP_JID) {
+        // Only the configured request group is allowed to trigger movie searches.
+        if (!REQUEST_GROUP_JID) {
           logger.warn({ groupJid: jid }, 'Ignoring this group message because REQUEST_GROUP_JID is not configured.');
           continue;
         }
-        if (isGroup && jid !== REQUEST_GROUP_JID) {
+        if (jid !== REQUEST_GROUP_JID) {
           logger.info({ groupJid: jid }, 'Ignoring message from a group that is not REQUEST_GROUP_JID.');
           continue;
         }
