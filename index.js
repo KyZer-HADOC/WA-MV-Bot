@@ -154,29 +154,45 @@ function saveDailyUsageStore() {
   renameSync(temporaryPath, DAILY_LIMITS_PATH);
 }
 
-function reserveDailyMovieRequest(userJid) {
+function getDailyMovieUsage(userJid) {
   const day = currentSriLankaDateKey();
-  if (!dailyUsageStore[day]) dailyUsageStore[day] = {};
-  const currentCount = Number(dailyUsageStore[day][userJid] || 0);
-
-  if (currentCount >= DAILY_MOVIE_LIMIT) {
-    return { allowed: false, day, count: currentCount, remaining: 0 };
-  }
-
-  const count = currentCount + 1;
-  dailyUsageStore[day][userJid] = count;
-  saveDailyUsageStore();
-  return { allowed: true, day, count, remaining: DAILY_MOVIE_LIMIT - count };
+  const count = Number(dailyUsageStore[day]?.[userJid] || 0);
+  return { day, count, remaining: Math.max(0, DAILY_MOVIE_LIMIT - count) };
 }
 
-function refundDailyMovieRequest(userJid, day) {
-  const entries = dailyUsageStore[day];
-  if (!entries || !Object.prototype.hasOwnProperty.call(entries, userJid)) return;
-  const count = Number(entries[userJid] || 0);
-  if (count <= 1) delete entries[userJid];
-  else entries[userJid] = count - 1;
-  if (Object.keys(entries).length === 0) delete dailyUsageStore[day];
+function recordDeliveredMovie(userJid) {
+  const day = currentSriLankaDateKey();
+  if (!dailyUsageStore[day]) dailyUsageStore[day] = {};
+  const count = Number(dailyUsageStore[day][userJid] || 0) + 1;
+  dailyUsageStore[day][userJid] = count;
   saveDailyUsageStore();
+  return { day, count, remaining: Math.max(0, DAILY_MOVIE_LIMIT - count) };
+}
+
+// Temporary in-memory delivery slots prevent parallel selections from sending
+// more than the remaining quota. A slot is NOT counted as used unless media
+// upload succeeds and recordDeliveredMovie() is called.
+const activeMovieDeliveries = new Map();
+
+function reserveMovieDeliverySlot(userJid) {
+  const usage = getDailyMovieUsage(userJid);
+  const key = usage.day + ':' + userJid;
+  const active = Number(activeMovieDeliveries.get(key) || 0);
+  if (usage.count >= DAILY_MOVIE_LIMIT) {
+    return { allowed: false, reason: 'limit', usage, key: '' };
+  }
+  if (usage.count + active >= DAILY_MOVIE_LIMIT) {
+    return { allowed: false, reason: 'busy', usage, key: '' };
+  }
+  activeMovieDeliveries.set(key, active + 1);
+  return { allowed: true, reason: '', usage, key };
+}
+
+function releaseMovieDeliverySlot(key) {
+  if (!key) return;
+  const active = Number(activeMovieDeliveries.get(key) || 0);
+  if (active <= 1) activeMovieDeliveries.delete(key);
+  else activeMovieDeliveries.set(key, active - 1);
 }
 
 logger.info({
@@ -672,69 +688,123 @@ async function handleSelection(sock, message, text, contextInfo) {
   const index = Number(text) - 1;
   if (index < 0 || index >= search.movies.length) return true;
 
+  const requesterJid = search.requesterJid || senderJid;
+  if (!requesterJid) {
+    await sock.sendMessage(message.key.remoteJid, {
+      text: '⚠️ I could not identify the requester, so I cannot apply the daily limit safely.'
+    }, { quoted: message });
+    return true;
+  }
+
+  const deliverySlot = reserveMovieDeliverySlot(requesterJid);
+  if (!deliverySlot.allowed) {
+    if (deliverySlot.reason === 'limit') {
+      pendingSearches.delete(quotedId);
+      await sock.sendMessage(message.key.remoteJid, {
+        text: '⛔ @' + requesterJid.split('@')[0].split(':')[0] +
+          ', you have already received ' + DAILY_MOVIE_LIMIT +
+          ' movie files today. Your limit resets at 12:00 AM Sri Lanka time.',
+        mentions: [requesterJid]
+      }, { quoted: message });
+    } else {
+      await sock.sendMessage(message.key.remoteJid, {
+        text: '⏳ Your other movie file is still being sent. Please wait and then select again. This does not use your daily limit.'
+      }, { quoted: message });
+    }
+    return true;
+  }
+
   const movie = search.movies[index];
   pendingSearches.delete(quotedId);
 
-  await sock.sendMessage(message.key.remoteJid, {
-    text: '🔎 Getting details and video file for *' + movie.title + '*...'
-  }, { quoted: message });
+  try {
+    await sock.sendMessage(message.key.remoteJid, {
+      text: '🔎 Getting details and video file for *' + movie.title + '*...'
+    }, { quoted: message });
 
-  const metadata = await getMovieMetadata(movie);
-  const details = formatDetails(movie, metadata);
-  const destinationJid = MOVIE_GROUP_JID || message.key.remoteJid;
-  const requesterJid = search.requesterJid || senderJid || '';
-  const requesterMention = requesterJid
-    ? '\n\n👤 Requested by @' + requesterJid.split('@')[0].split(':')[0]
-    : '';
-  const detailCaption = details + requesterMention;
-  const mentionOptions = requesterJid ? { mentions: [requesterJid] } : {};
+    const metadata = await getMovieMetadata(movie);
+    const details = formatDetails(movie, metadata);
+    const destinationJid = MOVIE_GROUP_JID || message.key.remoteJid;
+    const requesterMention = '\n\n👤 Requested by @' + requesterJid.split('@')[0].split(':')[0];
+    const detailCaption = details + requesterMention;
+    const mentionOptions = { mentions: [requesterJid] };
 
-  if (metadata.thumbnail) {
-    try {
-      await sock.sendMessage(destinationJid, {
-        image: { url: metadata.thumbnail },
-        caption: detailCaption,
-        ...mentionOptions
-      });
-    } catch {
+    if (metadata.thumbnail) {
+      try {
+        await sock.sendMessage(destinationJid, {
+          image: { url: metadata.thumbnail },
+          caption: detailCaption,
+          ...mentionOptions
+        });
+      } catch {
+        await sock.sendMessage(destinationJid, { text: detailCaption, ...mentionOptions });
+      }
+    } else {
       await sock.sendMessage(destinationJid, { text: detailCaption, ...mentionOptions });
     }
-  } else {
-    await sock.sendMessage(destinationJid, { text: detailCaption, ...mentionOptions });
-  }
 
-  let mediaResult = { sent: false, reason: MOVIE_GROUP_JID ? 'no verified video URL was available' : 'MOVIE_GROUP_JID is not configured', fallbackUrl: metadata.sourceUrl || '' };
-  if (MOVIE_GROUP_JID) {
-    try {
-      mediaResult = await sendAutomaticCineSubzMedia(sock, metadata, requesterJid);
-    } catch (error) {
-      logger.error({ err: error.message }, 'Media delivery failed.');
-      mediaResult = { sent: false, reason: error.message || 'media upload failed', fallbackUrl: metadata.sourceUrl || '' };
+    let mediaResult = {
+      sent: false,
+      reason: MOVIE_GROUP_JID ? 'no verified video URL was available' : 'MOVIE_GROUP_JID is not configured',
+      fallbackUrl: metadata.sourceUrl || ''
+    };
+    if (MOVIE_GROUP_JID) {
+      try {
+        mediaResult = await sendAutomaticCineSubzMedia(sock, metadata, requesterJid);
+      } catch (error) {
+        logger.error({ err: error.message }, 'Media delivery failed.');
+        mediaResult = {
+          sent: false,
+          reason: error.message || 'media upload failed',
+          fallbackUrl: metadata.sourceUrl || ''
+        };
+      }
     }
-  }
 
-  if (!mediaResult.sent && mediaResult.fallbackUrl) {
-    try {
-      await sock.sendMessage(destinationJid, {
-        text: '📥 Automatic video delivery failed because the API URL returned a web page rather than a direct video file. Open the available page here:\n' + mediaResult.fallbackUrl
-      });
-    } catch (error) {
-      logger.warn({ err: error?.message || String(error) }, 'Could not send the fallback download page.');
+    let deliveredUsage = null;
+    if (mediaResult.sent) {
+      deliveredUsage = recordDeliveredMovie(requesterJid);
+      logger.info({
+        requesterJid,
+        title: metadata.title,
+        dailyCount: deliveredUsage.count,
+        dailyLimit: DAILY_MOVIE_LIMIT,
+        date: deliveredUsage.day
+      }, 'Movie file was sent successfully; daily limit count incremented.');
+    } else {
+      logger.info({
+        requesterJid,
+        title: metadata.title,
+        dailyCount: getDailyMovieUsage(requesterJid).count,
+        dailyLimit: DAILY_MOVIE_LIMIT
+      }, 'Movie file was not sent; daily limit was not consumed.');
     }
-  }
 
-  const detailsSentToAnotherChat = destinationJid !== message.key.remoteJid;
-  let confirmation;
-  if (detailsSentToAnotherChat) {
-    confirmation = mediaResult.sent
-      ? '✅ *' + metadata.title + '* details, poster and video file sent to the Movie Group!'
-      : '✅ *' + metadata.title + '* details and poster sent to the Movie Group. Video was NOT sent: ' + mediaResult.reason + (mediaResult.fallbackUrl ? '. I sent the available page link to the Movie Group.' : '.');
-  } else {
-    confirmation = mediaResult.sent
-      ? '✅ *' + metadata.title + '* details, poster and video file are shown in this chat.'
-      : '✅ *' + metadata.title + '* details and poster are shown in this chat. Video was NOT sent: ' + mediaResult.reason + (mediaResult.fallbackUrl ? '. I sent the available page link here.' : '.');
+    if (!mediaResult.sent && mediaResult.fallbackUrl) {
+      try {
+        await sock.sendMessage(destinationJid, {
+          text: '📥 Automatic video delivery failed because the API did not provide a usable direct video file. Open the available page here:\n' + mediaResult.fallbackUrl
+        });
+      } catch (error) {
+        logger.warn({ err: error?.message || String(error) }, 'Could not send the fallback download page.');
+      }
+    }
+
+    const detailsSentToAnotherChat = destinationJid !== message.key.remoteJid;
+    let confirmation;
+    if (detailsSentToAnotherChat) {
+      confirmation = mediaResult.sent
+        ? '✅ *' + metadata.title + '* details, poster and video file sent to the Movie Group!\n🎟️ Movies received today: ' + deliveredUsage.count + '/' + DAILY_MOVIE_LIMIT + '.'
+        : '✅ *' + metadata.title + '* details and poster sent to the Movie Group. Video was NOT sent: ' + mediaResult.reason + '. Your daily limit was not used.';
+    } else {
+      confirmation = mediaResult.sent
+        ? '✅ *' + metadata.title + '* details, poster and video file are shown in this chat.\n🎟️ Movies received today: ' + deliveredUsage.count + '/' + DAILY_MOVIE_LIMIT + '.'
+        : '✅ *' + metadata.title + '* details and poster are shown in this chat. Video was NOT sent: ' + mediaResult.reason + '. Your daily limit was not used.';
+    }
+    await sock.sendMessage(message.key.remoteJid, { text: confirmation }, { quoted: message });
+  } finally {
+    releaseMovieDeliverySlot(deliverySlot.key);
   }
-  await sock.sendMessage(message.key.remoteJid, { text: confirmation }, { quoted: message });
 
   return true;
 }
@@ -865,7 +935,6 @@ async function start() {
     }
 
     for (const message of messages) {
-      let dailyReservation = null;
       try {
         const jid = message.key?.remoteJid;
         if (!jid) {
@@ -952,23 +1021,22 @@ async function start() {
             continue;
           }
 
-          const quota = reserveDailyMovieRequest(requesterJid);
-          if (!quota.allowed) {
+          const quota = getDailyMovieUsage(requesterJid);
+          if (quota.count >= DAILY_MOVIE_LIMIT) {
             logger.info({
               requesterJid,
               date: quota.day,
               count: quota.count,
               limit: DAILY_MOVIE_LIMIT
-            }, 'Daily movie request limit reached.');
+            }, 'Daily movie delivery limit reached before search.');
             await sock.sendMessage(jid, {
               text: '⛔ @' + requesterJid.split('@')[0].split(':')[0] +
-                ', you have used all ' + DAILY_MOVIE_LIMIT +
-                ' movie requests for today. Your limit resets at 12:00 AM Sri Lanka time.',
+                ', you have already received ' + DAILY_MOVIE_LIMIT +
+                ' movie files today. Your limit resets at 12:00 AM Sri Lanka time.',
               mentions: [requesterJid]
             }, { quoted: message });
             continue;
           }
-          dailyReservation = { userJid: requesterJid, day: quota.day, count: quota.count };
 
           logger.info({
             query: text,
@@ -980,8 +1048,23 @@ async function start() {
 
           const movies = await searchMovies(text);
           if (!movies.length) {
-            refundDailyMovieRequest(dailyReservation.userJid, dailyReservation.day);
-            dailyReservation = null;
+            await sock.sendMessage(jid, {
+              text: '😕 No matching titles were found for “' + text + '”. No daily limit used.'
+            }, { quoted: message });
+            continue;
+          }
+
+          const resultMessage = await sock.sendMessage(jid, {
+            text: makeResultsText(text, movies) +
+              '\n\n🎟️ Movies received today: ' + quota.count + '/' + DAILY_MOVIE_LIMIT +
+              '. A request counts only when the video file is successfully sent to the Movie Group. Limit resets at 12:00 AM Sri Lanka time.'
+          }, { quoted: message });
+
+          pendingSearches.set(resultMessage.key.id, {
+            movies,
+            requesterJid,
+            expiresAt: Date.now() + SEARCH_TTL_MS
+          });
             await sock.sendMessage(jid, {
               text: '😕 No matching titles were found for “' + text + '”. Your daily limit was not used.'
             }, { quoted: message });
@@ -1006,13 +1089,6 @@ async function start() {
           activeSearchChats.delete(jid);
         }
       } catch (error) {
-        if (dailyReservation) {
-          try {
-            refundDailyMovieRequest(dailyReservation.userJid, dailyReservation.day);
-          } catch (refundError) {
-            logger.error({ err: refundError?.message || String(refundError) }, 'Could not refund failed movie request quota.');
-          }
-        }
         logger.error({ err: error?.message || String(error) }, 'Incoming message handler failed.');
       }
     }
