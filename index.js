@@ -101,6 +101,9 @@ const activeSearchChats = new Set();
 const loggedGroupJids = new Set();
 const handledMessageIds = new Map();
 const MAX_RESULTS = 15;
+// WhatsApp's documented maximum document size is 2 GB. Skip larger mirrors
+// and keep checking later candidates for a smaller quality/version.
+const MAX_WHATSAPP_DOCUMENT_BYTES = 2 * 1024 * 1024 * 1024;
 const SEARCH_TTL_MS = 10 * 60 * 1000;
 let movieBoxUnavailableUntil = 0;
 
@@ -395,6 +398,16 @@ async function inspectDirectMediaUrl(videoUrl) {
       return {
         ok: false,
         reason: 'URL content is only ' + totalBytes + ' bytes, too small for a movie',
+        contentType,
+        totalBytes,
+        finalHost
+      };
+    }
+
+    if (totalBytes > MAX_WHATSAPP_DOCUMENT_BYTES) {
+      return {
+        ok: false,
+        reason: 'URL file is ' + totalBytes + ' bytes (about ' + (totalBytes / (1024 ** 3)).toFixed(2) + ' GiB), larger than WhatsApp\'s 2 GB document limit',
         contentType,
         totalBytes,
         finalHost
