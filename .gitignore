@@ -3,3 +3,5 @@ node_modules/
 auth_info/
 *.log
 config.json
+daily-limits.json
+daily-limits.json.tmp
