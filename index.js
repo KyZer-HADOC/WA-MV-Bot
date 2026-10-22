@@ -367,39 +367,35 @@ async function inspectDirectMediaUrl(videoUrl) {
 
 function extractMediaUrlCandidates(downloadLinks) {
   const found = [];
-  const allowedKeys = new Set([
-    'url', 'link', 'download', 'download_url', 'downloadurl',
-    'direct', 'direct_url', 'directurl', 'href', 'stream', 'src'
-  ]);
 
-  function add(value, label = '') {
+  function add(value, label = '', inheritedQuality = 0) {
     if (typeof value === 'string') {
       const candidate = value.trim();
       if (/^https:\/\//i.test(candidate) && !found.some(item => item.url === candidate)) {
-        found.push({ url: candidate, label });
+        found.push({ url: candidate, label, quality: inheritedQuality });
       }
       return;
     }
     if (Array.isArray(value)) {
-      for (const item of value) add(item, label);
+      for (const item of value) add(item, label, inheritedQuality);
       return;
     }
     if (value && typeof value === 'object') {
-      const text = JSON.stringify(value);
-      const quality = /1080p?/i.test(text) ? 3 : /720p?/i.test(text) ? 2 : /\bhd\b/i.test(text) ? 1 : 0;
+      const serialized = JSON.stringify(value);
+      const quality = /1080p?/i.test(serialized) ? 3
+        : /720p?/i.test(serialized) ? 2
+          : /\bhd\b/i.test(serialized) ? 1 : inheritedQuality;
+      // Providers have inconsistent field names (e.g. mirror labels).
+      // Walk all nested values and let the response header check reject pages.
       for (const [key, child] of Object.entries(value)) {
-        if (allowedKeys.has(key.toLowerCase())) add(child, key);
-        else if (Array.isArray(child) || (child && typeof child === 'object')) add(child, key);
-      }
-      for (const item of found) {
-        if (!item.quality) item.quality = quality;
+        add(child, key, quality);
       }
     }
   }
 
   add(downloadLinks);
   found.sort((a, b) => (b.quality || 0) - (a.quality || 0));
-  return found.slice(0, 5);
+  return found.slice(0, 10);
 }
 
 async function sendAutomaticCineSubzMedia(sock, metadata) {
@@ -427,17 +423,32 @@ async function sendAutomaticCineSubzMedia(sock, metadata) {
     }
 
     const filename = (metadata.title + '.mp4').replace(/[\\/:*?"<>|]/g, '_').slice(0, 120);
-    await sock.sendMessage(MOVIE_GROUP_JID, {
-      document: { url: candidate.url },
-      mimetype: 'video/mp4',
-      fileName: filename,
-      caption: '🎬 *' + metadata.title + '*\n🎥 Video file'
-    });
-    logger.info({
-      contentType: inspection.contentType || null,
-      totalBytes: inspection.totalBytes || null
-    }, 'Verified a likely direct video URL and queued the media upload.');
-    return { sent: true, reason: '', fallbackUrl: '' };
+    // WhatsApp/Baileys upload failures can be transient. Retry once only to
+    // avoid repeatedly consuming the user's data for a large movie.
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        await sock.sendMessage(MOVIE_GROUP_JID, {
+          document: { url: candidate.url },
+          mimetype: 'video/mp4',
+          fileName: filename,
+          caption: '🎬 *' + metadata.title + '*\n🎥 Video file'
+        });
+        logger.info({
+          contentType: inspection.contentType || null,
+          totalBytes: inspection.totalBytes || null,
+          attempt
+        }, 'Verified a likely direct video URL and uploaded media successfully.');
+        return { sent: true, reason: '', fallbackUrl: '' };
+      } catch (error) {
+        lastReason = 'WhatsApp upload failed: ' + (error?.message || String(error));
+        logger.warn({
+          attempt,
+          host: (() => { try { return new URL(candidate.url).host; } catch { return 'unknown'; } })(),
+          err: error?.message || String(error)
+        }, 'Video upload attempt failed.');
+        if (attempt === 1) await new Promise(resolve => setTimeout(resolve, 2500));
+      }
+    }
   }
 
   return {
