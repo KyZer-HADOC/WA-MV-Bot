@@ -311,28 +311,99 @@ function formatDetails(movie, metadata) {
   return lines.join('\n');
 }
 
+async function inspectDirectMediaUrl(videoUrl) {
+  let response;
+  try {
+    response = await axios.get(videoUrl, {
+      responseType: 'stream',
+      timeout: 25000,
+      maxRedirects: 8,
+      headers: {
+        Range: 'bytes=0-0',
+        Accept: 'video/*,application/octet-stream;q=0.9,*/*;q=0.1'
+      },
+      validateStatus: status => status >= 200 && status < 400
+    });
+
+    const headers = response.headers || {};
+    const contentType = String(headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+    const contentRange = String(headers['content-range'] || '');
+    const rangeTotal = Number(contentRange.match(/\/(\d+)$/)?.[1] || 0);
+    const contentLength = Number(headers['content-length'] || 0);
+    const totalBytes = rangeTotal || (response.status === 206 ? 0 : contentLength);
+    response.data?.on?.('error', () => {});
+    response.data?.destroy?.();
+
+    const isMediaType =
+      contentType.startsWith('video/') ||
+      contentType === 'application/octet-stream' ||
+      contentType === 'binary/octet-stream';
+
+    if (!isMediaType) {
+      return {
+        ok: false,
+        reason: 'URL returned ' + (contentType || 'unknown content type') + ', not a video file',
+        contentType,
+        totalBytes
+      };
+    }
+
+    if (totalBytes > 0 && totalBytes < 1000000) {
+      return {
+        ok: false,
+        reason: 'URL content is only ' + totalBytes + ' bytes, too small for a movie',
+        contentType,
+        totalBytes
+      };
+    }
+
+    return { ok: true, contentType, totalBytes };
+  } catch (error) {
+    response?.data?.on?.('error', () => {});
+    response?.data?.destroy?.();
+    return { ok: false, reason: 'Could not verify video URL: ' + (error?.message || String(error)) };
+  }
+}
+
 async function sendAutomaticCineSubzMedia(sock, metadata) {
   let videoUrl = '';
   const links = metadata.downloadLinks;
 
   if (Array.isArray(links) && links.length > 0) {
     const preferred = links.find(l => /720|1080|hd/i.test(JSON.stringify(l))) || links[0];
-    videoUrl = typeof preferred === 'string' ? preferred : (preferred.link || preferred.url || '');
+    videoUrl = typeof preferred === 'string' ? preferred : (preferred.link || preferred.url || preferred.download || '');
   } else if (links && typeof links === 'object') {
-    videoUrl = links.url || links.link || Object.values(links)[0] || '';
+    videoUrl = links.url || links.link || links.download || Object.values(links).find(value => typeof value === 'string' && /^https:\/\//i.test(value)) || '';
   }
 
-  if (videoUrl && /^https:\/\//i.test(videoUrl)) {
-    const filename = (metadata.title + '.mp4').replace(/[\\/:*?"<>|]/g, '_').slice(0, 120);
-    await sock.sendMessage(MOVIE_GROUP_JID, {
-      document: { url: videoUrl },
-      mimetype: 'video/mp4',
-      fileName: filename,
-      caption: '🎬 *' + metadata.title + '*\n🎥 Direct Video file from CineSubz!'
-    });
-    return true;
+  if (!videoUrl || !/^https:\/\//i.test(videoUrl)) {
+    logger.warn('Chama API did not return an HTTPS media URL.');
+    return { sent: false, reason: 'the API did not return a direct HTTPS video URL' };
   }
-  return false;
+
+  // Do not upload a small HTML redirect/advert page and label it as an MP4.
+  const inspection = await inspectDirectMediaUrl(videoUrl);
+  if (!inspection.ok) {
+    logger.warn({
+      contentType: inspection.contentType || null,
+      totalBytes: inspection.totalBytes || null,
+      reason: inspection.reason
+    }, 'Rejected a non-video or suspiciously small download URL.');
+    return { sent: false, reason: inspection.reason };
+  }
+
+  const filename = (metadata.title + '.mp4').replace(/[\\/:*?"<>|]/g, '_').slice(0, 120);
+  await sock.sendMessage(MOVIE_GROUP_JID, {
+    document: { url: videoUrl },
+    mimetype: 'video/mp4',
+    fileName: filename,
+    caption: '🎬 *' + metadata.title + '*\n🎥 Video file'
+  });
+  logger.info({
+    contentType: inspection.contentType || null,
+    totalBytes: inspection.totalBytes || null
+  }, 'Verified a likely direct video URL and queued the media upload.');
+  return { sent: true, reason: '' };
 }
 
 async function handleSelection(sock, message, text, contextInfo) {
@@ -383,23 +454,26 @@ async function handleSelection(sock, message, text, contextInfo) {
     await sock.sendMessage(destinationJid, { text: details });
   }
 
-  let mediaSent = false;
+  let mediaResult = { sent: false, reason: MOVIE_GROUP_JID ? 'no verified video URL was available' : 'MOVIE_GROUP_JID is not configured' };
   if (MOVIE_GROUP_JID) {
     try {
-      mediaSent = await sendAutomaticCineSubzMedia(sock, metadata);
+      mediaResult = await sendAutomaticCineSubzMedia(sock, metadata);
     } catch (error) {
       logger.error({ err: error.message }, 'Media delivery failed.');
+      mediaResult = { sent: false, reason: error.message || 'media upload failed' };
     }
   }
 
   const detailsSentToAnotherChat = destinationJid !== message.key.remoteJid;
   let confirmation;
   if (detailsSentToAnotherChat) {
-    confirmation = mediaSent
+    confirmation = mediaResult.sent
       ? '✅ *' + metadata.title + '* details, poster and video file sent to the Movie Group!'
-      : '✅ *' + metadata.title + '* details and poster sent to the Movie Group.';
+      : '✅ *' + metadata.title + '* details and poster sent to the Movie Group. Video was NOT sent: ' + mediaResult.reason + '.';
   } else {
-    confirmation = '✅ *' + metadata.title + '* details and poster are shown in this chat.';
+    confirmation = mediaResult.sent
+      ? '✅ *' + metadata.title + '* details, poster and video file are shown in this chat.'
+      : '✅ *' + metadata.title + '* details and poster are shown in this chat. Video was NOT sent: ' + mediaResult.reason + '.';
   }
   await sock.sendMessage(message.key.remoteJid, { text: confirmation }, { quoted: message });
 
