@@ -99,6 +99,7 @@ logger.info({
 const pendingSearches = new Map();
 const activeSearchChats = new Set();
 const loggedGroupJids = new Set();
+const handledMessageIds = new Map();
 const MAX_RESULTS = 15;
 const SEARCH_TTL_MS = 10 * 60 * 1000;
 let movieBoxUnavailableUntil = 0;
@@ -405,6 +406,52 @@ async function handleSelection(sock, message, text, contextInfo) {
   return true;
 }
 
+function getTimestampSeconds(message) {
+  const raw = message?.messageTimestamp;
+  if (raw == null) return NaN;
+  const value = Number(typeof raw?.toNumber === 'function' ? raw.toNumber() : raw.toString?.() ?? raw);
+  return Number.isFinite(value) ? value : NaN;
+}
+
+function shouldHandleUpsertMessage(message, eventType, chatJid) {
+  const nowMs = Date.now();
+  const messageId = message?.key?.id;
+  const dedupeKey = messageId ? chatJid + ':' + messageId : '';
+
+  if (dedupeKey && handledMessageIds.has(dedupeKey)) {
+    logger.info({ chatJid, messageId, eventType }, 'Skipping duplicate WhatsApp message event.');
+    return false;
+  }
+
+  // Baileys "append" events are usually older/offline-synced messages. Only
+  // accept recent ones, so a delayed message is not silently lost while a
+  // large historical sync does not trigger searches for old chat history.
+  if (eventType === 'append') {
+    const timestampSeconds = getTimestampSeconds(message);
+    const ageSeconds = Math.floor(nowMs / 1000) - timestampSeconds;
+    if (!Number.isFinite(timestampSeconds) || timestampSeconds <= 0 || ageSeconds > 300 || ageSeconds < -30) {
+      logger.info({
+        chatJid,
+        messageId: messageId || null,
+        ageSeconds: Number.isFinite(ageSeconds) ? ageSeconds : null
+      }, 'Ignoring historical WhatsApp append message.');
+      return false;
+    }
+  }
+
+  if (dedupeKey) {
+    handledMessageIds.set(dedupeKey, nowMs);
+    if (handledMessageIds.size > 2000) {
+      for (const [key, time] of handledMessageIds) {
+        if (nowMs - time > 10 * 60 * 1000 || handledMessageIds.size > 1800) {
+          handledMessageIds.delete(key);
+        }
+      }
+    }
+  }
+  return true;
+}
+
 async function start() {
   // Baileys sessions are stored in auth_info/ by default. Make sure the
   // directory exists and report whether a previously paired session was loaded.
@@ -479,7 +526,10 @@ async function start() {
       messageCount: Array.isArray(messages) ? messages.length : 0
     }, 'WhatsApp messages.upsert event received.');
 
-    if (type !== 'notify') return;
+    if (type !== 'notify' && type !== 'append') {
+      logger.info({ eventType: type }, 'Ignoring non-message-notification upsert type.');
+      return;
+    }
 
     for (const message of messages) {
       try {
@@ -488,6 +538,7 @@ async function start() {
           logger.warn('Received a WhatsApp message event without remoteJid.');
           continue;
         }
+        if (!shouldHandleUpsertMessage(message, type, jid)) continue;
 
         const isGroup = isGroupJid(jid);
         const rawContent = unwrapMessage(message.message);
