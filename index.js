@@ -31,7 +31,7 @@ for (const method of ['error', 'warn', 'log']) {
   };
 }
 import path from 'node:path';
-import { readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import makeWASocket, {
   useMultiFileAuthState,
@@ -40,7 +40,7 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const AUTH_DIR = path.join(__dirname, 'auth_info');
+const AUTH_DIR = path.resolve(process.env.BAILEYS_AUTH_DIR?.trim() || path.join(__dirname, 'auth_info'));
 const CONFIG_PATH = path.join(__dirname, 'config.json');
 
 let fileConfig = {};
@@ -390,7 +390,19 @@ async function handleSelection(sock, message, text, contextInfo) {
 }
 
 async function start() {
+  // Baileys sessions are stored in auth_info/ by default. Make sure the
+  // directory exists and report whether a previously paired session was loaded.
+  mkdirSync(AUTH_DIR, { recursive: true });
+  const credsFile = path.join(AUTH_DIR, 'creds.json');
+  const credsFileExisted = existsSync(credsFile);
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+
+  logger.info({
+    authDir: AUTH_DIR,
+    credsFileExists: credsFileExisted,
+    sessionRegistered: Boolean(state.creds.registered)
+  }, 'Loaded WhatsApp auth state');
+
   let version;
   try {
     ({ version } = await fetchLatestBaileysVersion());
@@ -405,15 +417,43 @@ async function start() {
     syncFullHistory: false
   });
 
-  sock.ev.on('creds.update', saveCreds);
+  sock.ev.on('creds.update', async () => {
+    try {
+      await saveCreds();
+    } catch (error) {
+      logger.error({ err: error?.message || String(error), authDir: AUTH_DIR }, 'Could not save WhatsApp credentials.');
+    }
+  });
 
-  sock.ev.on('connection.update', ({ connection, qr }) => {
+  sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
     if (qr) {
+      if (state.creds.registered) {
+        logger.warn('WhatsApp requested a new QR even though a registered session was loaded. Check the disconnect reason and auth_info persistence.');
+      } else {
+        logger.warn({ authDir: AUTH_DIR, credsFileExists: existsSync(credsFile) }, 'No registered WhatsApp session was loaded; QR pairing is required.');
+      }
       qrcode.generate(qr, { small: true });
     }
+
     if (connection === 'open') logger.info('WhatsApp connected.');
+
     if (connection === 'close') {
-      setTimeout(() => start().catch(() => {}), 4000);
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+      logger.warn({
+        statusCode: statusCode ?? null,
+        shouldReconnect,
+        sessionRegistered: Boolean(state.creds.registered),
+        authDir: AUTH_DIR
+      }, 'WhatsApp connection closed.');
+
+      if (shouldReconnect) {
+        setTimeout(() => start().catch(error => {
+          logger.error({ err: error?.message || String(error) }, 'WhatsApp reconnect failed.');
+        }), 4000);
+      } else {
+        logger.error('WhatsApp logged this session out. Re-pair once; repeated automatic QR generation has been stopped.');
+      }
     }
   });
 
