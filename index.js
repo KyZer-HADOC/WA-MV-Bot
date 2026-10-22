@@ -46,7 +46,7 @@ for (const method of ['error', 'warn', 'log']) {
   };
 }
 import path from 'node:path';
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import makeWASocket, {
   useMultiFileAuthState,
@@ -110,6 +110,74 @@ logger.info({
   requestGroupConfigured: Boolean(REQUEST_GROUP_JID),
   movieGroupConfigured: Boolean(MOVIE_GROUP_JID)
 }, 'Startup configuration check');
+
+const DAILY_MOVIE_LIMIT = 4;
+const DAILY_LIMITS_PATH = path.join(__dirname, 'daily-limits.json');
+const DAILY_LIMIT_TIME_ZONE = 'Asia/Colombo';
+
+function loadDailyUsageStore() {
+  try {
+    if (!existsSync(DAILY_LIMITS_PATH)) return {};
+    const parsed = JSON.parse(readFileSync(DAILY_LIMITS_PATH, 'utf8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (error) {
+    logger.warn({ err: error?.message || String(error) }, 'Could not load daily movie usage file; starting with an empty counter.');
+    return {};
+  }
+}
+
+const dailyUsageStore = loadDailyUsageStore();
+
+function currentSriLankaDateKey() {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: DAILY_LIMIT_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(new Date());
+  const part = Object.fromEntries(parts.map(item => [item.type, item.value]));
+  return part.year + '-' + part.month + '-' + part.day;
+}
+
+function saveDailyUsageStore() {
+  const today = currentSriLankaDateKey();
+  const cutoffDate = new Date(today + 'T00:00:00.000Z');
+  cutoffDate.setUTCDate(cutoffDate.getUTCDate() - 7);
+  const cutoff = cutoffDate.toISOString().slice(0, 10);
+
+  for (const day of Object.keys(dailyUsageStore)) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || day < cutoff) delete dailyUsageStore[day];
+  }
+
+  const temporaryPath = DAILY_LIMITS_PATH + '.tmp';
+  writeFileSync(temporaryPath, JSON.stringify(dailyUsageStore, null, 2), { encoding: 'utf8', mode: 0o600 });
+  renameSync(temporaryPath, DAILY_LIMITS_PATH);
+}
+
+function reserveDailyMovieRequest(userJid) {
+  const day = currentSriLankaDateKey();
+  if (!dailyUsageStore[day]) dailyUsageStore[day] = {};
+  const currentCount = Number(dailyUsageStore[day][userJid] || 0);
+
+  if (currentCount >= DAILY_MOVIE_LIMIT) {
+    return { allowed: false, day, count: currentCount, remaining: 0 };
+  }
+
+  const count = currentCount + 1;
+  dailyUsageStore[day][userJid] = count;
+  saveDailyUsageStore();
+  return { allowed: true, day, count, remaining: DAILY_MOVIE_LIMIT - count };
+}
+
+function refundDailyMovieRequest(userJid, day) {
+  const entries = dailyUsageStore[day];
+  if (!entries || !Object.prototype.hasOwnProperty.call(entries, userJid)) return;
+  const count = Number(entries[userJid] || 0);
+  if (count <= 1) delete entries[userJid];
+  else entries[userJid] = count - 1;
+  if (Object.keys(entries).length === 0) delete dailyUsageStore[day];
+  saveDailyUsageStore();
+}
 
 const pendingSearches = new Map();
 const activeSearchChats = new Set();
@@ -791,6 +859,7 @@ async function start() {
     }
 
     for (const message of messages) {
+      let dailyReservation = null;
       try {
         const jid = message.key?.remoteJid;
         if (!jid) {
@@ -865,29 +934,77 @@ async function start() {
             continue;
           }
 
-          logger.info({ query: text }, 'Searching CineSubz for movie title.');
+          const requesterJid = requesterJidFromMessage(sock, message);
+          if (!requesterJid) {
+            logger.warn({ chatJid: jid }, 'Could not identify requester for daily movie quota.');
+            await sock.sendMessage(jid, {
+              text: '⚠️ I could not identify your WhatsApp account, so I cannot apply your daily movie limit. Please try again from a normal WhatsApp message.'
+            }, { quoted: message });
+            continue;
+          }
+
+          const quota = reserveDailyMovieRequest(requesterJid);
+          if (!quota.allowed) {
+            logger.info({
+              requesterJid,
+              date: quota.day,
+              count: quota.count,
+              limit: DAILY_MOVIE_LIMIT
+            }, 'Daily movie request limit reached.');
+            await sock.sendMessage(jid, {
+              text: '⛔ @' + requesterJid.split('@')[0].split(':')[0] +
+                ', you have used all ' + DAILY_MOVIE_LIMIT +
+                ' movie requests for today. Your limit resets at 12:00 AM Sri Lanka time.',
+              mentions: [requesterJid]
+            }, { quoted: message });
+            continue;
+          }
+          dailyReservation = { userJid: requesterJid, day: quota.day, count: quota.count };
+
+          logger.info({
+            query: text,
+            requesterJid,
+            dailyCount: quota.count,
+            dailyLimit: DAILY_MOVIE_LIMIT,
+            resetTimeZone: DAILY_LIMIT_TIME_ZONE
+          }, 'Searching CineSubz for movie title.');
+
           const movies = await searchMovies(text);
           if (!movies.length) {
+            refundDailyMovieRequest(dailyReservation.userJid, dailyReservation.day);
+            dailyReservation = null;
             await sock.sendMessage(jid, {
-              text: '😕 No matching titles were found for “' + text + '”.'
+              text: '😕 No matching titles were found for “' + text + '”. Your daily limit was not used.'
             }, { quoted: message });
             continue;
           }
 
           const resultMessage = await sock.sendMessage(jid, {
-            text: makeResultsText(text, movies)
+            text: makeResultsText(text, movies) +
+              '\n\n🎟️ Daily movie requests: ' + quota.count + '/' + DAILY_MOVIE_LIMIT +
+              ' (resets at 12:00 AM Sri Lanka time).'
           }, { quoted: message });
 
           pendingSearches.set(resultMessage.key.id, {
             movies,
-            requesterJid: requesterJidFromMessage(sock, message),
+            requesterJid,
             expiresAt: Date.now() + SEARCH_TTL_MS
           });
+          // Count successful searches only. Once the choices were sent,
+          // the daily request has been consumed and must not be refunded.
+          dailyReservation = null;
         } finally {
           activeSearchChats.delete(jid);
         }
       } catch (error) {
-        logger.error({ err: error?.message });
+        if (dailyReservation) {
+          try {
+            refundDailyMovieRequest(dailyReservation.userJid, dailyReservation.day);
+          } catch (refundError) {
+            logger.error({ err: refundError?.message || String(refundError) }, 'Could not refund failed movie request quota.');
+          }
+        }
+        logger.error({ err: error?.message || String(error) }, 'Incoming message handler failed.');
       }
     }
   });
