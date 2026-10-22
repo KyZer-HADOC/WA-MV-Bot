@@ -365,45 +365,86 @@ async function inspectDirectMediaUrl(videoUrl) {
   }
 }
 
+function extractMediaUrlCandidates(downloadLinks) {
+  const found = [];
+  const allowedKeys = new Set([
+    'url', 'link', 'download', 'download_url', 'downloadurl',
+    'direct', 'direct_url', 'directurl', 'href', 'stream', 'src'
+  ]);
+
+  function add(value, label = '') {
+    if (typeof value === 'string') {
+      const candidate = value.trim();
+      if (/^https:\/\//i.test(candidate) && !found.some(item => item.url === candidate)) {
+        found.push({ url: candidate, label });
+      }
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) add(item, label);
+      return;
+    }
+    if (value && typeof value === 'object') {
+      const text = JSON.stringify(value);
+      const quality = /1080p?/i.test(text) ? 3 : /720p?/i.test(text) ? 2 : /\bhd\b/i.test(text) ? 1 : 0;
+      for (const [key, child] of Object.entries(value)) {
+        if (allowedKeys.has(key.toLowerCase())) add(child, key);
+        else if (Array.isArray(child) || (child && typeof child === 'object')) add(child, key);
+      }
+      for (const item of found) {
+        if (!item.quality) item.quality = quality;
+      }
+    }
+  }
+
+  add(downloadLinks);
+  found.sort((a, b) => (b.quality || 0) - (a.quality || 0));
+  return found.slice(0, 5);
+}
+
 async function sendAutomaticCineSubzMedia(sock, metadata) {
-  let videoUrl = '';
-  const links = metadata.downloadLinks;
+  const candidates = extractMediaUrlCandidates(metadata.downloadLinks);
+  let lastReason = 'the API did not return a direct HTTPS video URL';
 
-  if (Array.isArray(links) && links.length > 0) {
-    const preferred = links.find(l => /720|1080|hd/i.test(JSON.stringify(l))) || links[0];
-    videoUrl = typeof preferred === 'string' ? preferred : (preferred.link || preferred.url || preferred.download || '');
-  } else if (links && typeof links === 'object') {
-    videoUrl = links.url || links.link || links.download || Object.values(links).find(value => typeof value === 'string' && /^https:\/\//i.test(value)) || '';
+  if (!candidates.length) {
+    logger.warn('Chama API did not return an HTTPS media URL in a recognized download field.');
+    return { sent: false, reason: lastReason, fallbackUrl: metadata.sourceUrl || '' };
   }
 
-  if (!videoUrl || !/^https:\/\//i.test(videoUrl)) {
-    logger.warn('Chama API did not return an HTTPS media URL.');
-    return { sent: false, reason: 'the API did not return a direct HTTPS video URL' };
-  }
+  // Some APIs list several mirror/download pages. Check a few candidates so
+  // one HTML page does not prevent a later direct video URL from being used.
+  for (const candidate of candidates) {
+    const inspection = await inspectDirectMediaUrl(candidate.url);
+    if (!inspection.ok) {
+      lastReason = inspection.reason;
+      logger.warn({
+        host: (() => { try { return new URL(candidate.url).host; } catch { return 'unknown'; } })(),
+        contentType: inspection.contentType || null,
+        totalBytes: inspection.totalBytes || null,
+        reason: inspection.reason
+      }, 'Rejected a non-video or suspiciously small media candidate.');
+      continue;
+    }
 
-  // Do not upload a small HTML redirect/advert page and label it as an MP4.
-  const inspection = await inspectDirectMediaUrl(videoUrl);
-  if (!inspection.ok) {
-    logger.warn({
+    const filename = (metadata.title + '.mp4').replace(/[\\/:*?"<>|]/g, '_').slice(0, 120);
+    await sock.sendMessage(MOVIE_GROUP_JID, {
+      document: { url: candidate.url },
+      mimetype: 'video/mp4',
+      fileName: filename,
+      caption: '🎬 *' + metadata.title + '*\n🎥 Video file'
+    });
+    logger.info({
       contentType: inspection.contentType || null,
-      totalBytes: inspection.totalBytes || null,
-      reason: inspection.reason
-    }, 'Rejected a non-video or suspiciously small download URL.');
-    return { sent: false, reason: inspection.reason };
+      totalBytes: inspection.totalBytes || null
+    }, 'Verified a likely direct video URL and queued the media upload.');
+    return { sent: true, reason: '', fallbackUrl: '' };
   }
 
-  const filename = (metadata.title + '.mp4').replace(/[\\/:*?"<>|]/g, '_').slice(0, 120);
-  await sock.sendMessage(MOVIE_GROUP_JID, {
-    document: { url: videoUrl },
-    mimetype: 'video/mp4',
-    fileName: filename,
-    caption: '🎬 *' + metadata.title + '*\n🎥 Video file'
-  });
-  logger.info({
-    contentType: inspection.contentType || null,
-    totalBytes: inspection.totalBytes || null
-  }, 'Verified a likely direct video URL and queued the media upload.');
-  return { sent: true, reason: '' };
+  return {
+    sent: false,
+    reason: lastReason,
+    fallbackUrl: candidates[0]?.url || metadata.sourceUrl || ''
+  };
 }
 
 async function handleSelection(sock, message, text, contextInfo) {
@@ -454,13 +495,23 @@ async function handleSelection(sock, message, text, contextInfo) {
     await sock.sendMessage(destinationJid, { text: details });
   }
 
-  let mediaResult = { sent: false, reason: MOVIE_GROUP_JID ? 'no verified video URL was available' : 'MOVIE_GROUP_JID is not configured' };
+  let mediaResult = { sent: false, reason: MOVIE_GROUP_JID ? 'no verified video URL was available' : 'MOVIE_GROUP_JID is not configured', fallbackUrl: metadata.sourceUrl || '' };
   if (MOVIE_GROUP_JID) {
     try {
       mediaResult = await sendAutomaticCineSubzMedia(sock, metadata);
     } catch (error) {
       logger.error({ err: error.message }, 'Media delivery failed.');
-      mediaResult = { sent: false, reason: error.message || 'media upload failed' };
+      mediaResult = { sent: false, reason: error.message || 'media upload failed', fallbackUrl: metadata.sourceUrl || '' };
+    }
+  }
+
+  if (!mediaResult.sent && mediaResult.fallbackUrl) {
+    try {
+      await sock.sendMessage(destinationJid, {
+        text: '📥 Automatic video delivery failed because the API URL returned a web page rather than a direct video file. Open the available page here:\n' + mediaResult.fallbackUrl
+      });
+    } catch (error) {
+      logger.warn({ err: error?.message || String(error) }, 'Could not send the fallback download page.');
     }
   }
 
@@ -469,11 +520,11 @@ async function handleSelection(sock, message, text, contextInfo) {
   if (detailsSentToAnotherChat) {
     confirmation = mediaResult.sent
       ? '✅ *' + metadata.title + '* details, poster and video file sent to the Movie Group!'
-      : '✅ *' + metadata.title + '* details and poster sent to the Movie Group. Video was NOT sent: ' + mediaResult.reason + '.';
+      : '✅ *' + metadata.title + '* details and poster sent to the Movie Group. Video was NOT sent: ' + mediaResult.reason + (mediaResult.fallbackUrl ? '. I sent the available page link to the Movie Group.' : '.');
   } else {
     confirmation = mediaResult.sent
       ? '✅ *' + metadata.title + '* details, poster and video file are shown in this chat.'
-      : '✅ *' + metadata.title + '* details and poster are shown in this chat. Video was NOT sent: ' + mediaResult.reason + '.';
+      : '✅ *' + metadata.title + '* details and poster are shown in this chat. Video was NOT sent: ' + mediaResult.reason + (mediaResult.fallbackUrl ? '. I sent the available page link here.' : '.');
   }
   await sock.sendMessage(message.key.remoteJid, { text: confirmation }, { quoted: message });
 
