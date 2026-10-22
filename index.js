@@ -255,7 +255,7 @@ async function getMovieMetadata(movie) {
           const value = data[key];
           if (Array.isArray(value)) return { field: key, type: 'array', length: value.length };
           if (value && typeof value === 'object') return { field: key, type: 'object', keys: Object.keys(value).slice(0, 20) };
-          if (typeof value === 'string') return { field: key, type: 'string', length: value.length, looksLikeUrl: /^https?:\\/\\//i.test(value.trim()) };
+          if (typeof value === 'string') return { field: key, type: 'string', length: value.length, looksLikeUrl: /^https?:\/\//i.test(value.trim()) };
           return { field: key, type: typeof value };
         });
       logger.info({ downloadFields: downloadFieldSummary }, 'Inspected CineSubz download response fields.');
