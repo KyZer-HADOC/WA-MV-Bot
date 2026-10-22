@@ -3,8 +3,6 @@ import axios from 'axios';
 import qrcode from 'qrcode-terminal';
 import pino from 'pino';
 
-// Quiet only the repetitive Baileys/libsignal Bad MAC stack spam so the bot's
-// own diagnostic logs remain readable. This does not repair failed decryption.
 function consoleArgsToText(args) {
     return args.map((value) => {
         if (value instanceof Error) return value.stack || value.message;
@@ -88,7 +86,6 @@ logger.info({
 
 const pendingSearches = new Map();
 const activeSearchChats = new Set();
-const loggedGroupJids = new Set();
 const MAX_RESULTS = 15;
 const SEARCH_TTL_MS = 10 * 60 * 1000;
 
@@ -133,7 +130,7 @@ function safeText(value, fallback = 'Not listed') {
     return cleaned || fallback;
 }
 
-function absoluteHttpUrl(value, baseUrl = MOVIEBOX_API_URL) {
+function absoluteHttpUrl(value, baseUrl = 'https://cinesubz.net') {
     if (!value) return '';
     try {
         const url = new URL(value, baseUrl);
@@ -141,48 +138,6 @@ function absoluteHttpUrl(value, baseUrl = MOVIEBOX_API_URL) {
     } catch {
         return '';
     }
-}
-
-async function searchMovieBox(query) {
-    let endpoint;
-    try {
-        endpoint = new URL(MOVIEBOX_API_URL);
-    } catch {
-        throw new Error('MOVIEBOX_API_URL is not a valid URL.');
-    }
-    if (endpoint.protocol !== 'https:') {
-        throw new Error('MOVIEBOX_API_URL must use HTTPS.');
-    }
-
-    const response = await axios.post(MOVIEBOX_API_URL + '/search', {
-        keyword: query,
-        page: 1,
-        perPage: MAX_RESULTS
-    }, {
-        headers: {
-            'X-Worker-Secret': MOVIEBOX_SECRET,
-            'Content-Type': 'application/json',
-            'Accept': 'application/json'
-        },
-        timeout: 90000,
-        maxContentLength: 2 * 1024 * 1024
-    });
-
-    const items = Array.isArray(response.data?.items) ? response.data.items : [];
-    return items.slice(0, MAX_RESULTS).map(item => ({
-        provider: item.provider === 'wikipedia' ? 'wikipedia' : 'moviebox',
-        subjectId: String(item.subjectId || ''),
-        subjectType: item.subjectType,
-        title: safeText(item.title, ''),
-        poster: absoluteHttpUrl(item.poster, MOVIEBOX_API_URL),
-        language: safeText(item.language, ''),
-        duration: safeText(item.duration, ''),
-        releaseDate: safeText(item.releaseDate, ''),
-        rating: item.rating == null ? '' : String(item.rating),
-        genre: safeText(item.genre, ''),
-        country: safeText(item.country, ''),
-        type: safeText(item.type, '')
-    })).filter(item => item.title && item.subjectId);
 }
 
 async function searchCineSubz(query) {
@@ -198,8 +153,6 @@ async function searchCineSubz(query) {
     }
 
     const items = Array.isArray(response.data?.data) ? response.data.data : [];
-    logger.info({ httpStatus: response.status, rawItemCount: items.length }, 'Chama CineSubz search response received');
-
     return items.slice(0, MAX_RESULTS).map(item => {
         const title = safeText(item.title, '');
         const pageUrl = absoluteHttpUrl(item.link, 'https://cinesubz.net');
@@ -223,88 +176,16 @@ async function searchCineSubz(query) {
     }).filter(item => item.title && item.subjectId);
 }
 
-async function searchWikipedia(query) {
-    const response = await axios.get('https://en.wikipedia.org/w/rest.php/v1/search/page', {
-        params: { q: query, limit: MAX_RESULTS },
-        headers: {
-            'Accept': 'application/json',
-            'User-Agent': 'WA-MV-Bot/1.0 (movie title metadata search)'
-        },
-        timeout: 20000,
-        maxContentLength: 2 * 1024 * 1024
-    });
-
-    const pages = Array.isArray(response.data?.pages) ? response.data.pages : [];
-    const likelyMoviePages = pages.filter(page => {
-        const text = [page.title || '', page.description || '', page.excerpt || ''].join(' ');
-        return /\b(film|movie|motion picture|television film)\b/i.test(text);
-    });
-    const selectedPages = (likelyMoviePages.length ? likelyMoviePages : pages).slice(0, MAX_RESULTS);
-
-    return selectedPages.map(page => {
-        const pageText = [page.description || '', page.excerpt || ''].join(' ');
-        const year = pageText.match(/\b(18|19|20)\d{2}\b/)?.[0] || '';
-        const title = safeText(page.title, '');
-        return {
-            provider: 'wikipedia',
-            subjectId: String(page.id || page.key || title),
-            subjectType: 1,
-            title,
-            poster: absoluteHttpUrl(page.thumbnail?.url || '', 'https://en.wikipedia.org'),
-            language: '',
-            duration: '',
-            releaseDate: year,
-            rating: '',
-            genre: '',
-            country: '',
-            type: 'movie',
-            sourceUrl: page.key ? 'https://en.wikipedia.org/wiki/' + encodeURIComponent(page.key).replace(/%2F/gi, '/') : ''
-        };
-    }).filter(item => item.title && item.subjectId);
-}
-
-async function useWikipediaFallback(query, originalError = null) {
-    try {
-        const results = await searchWikipedia(query);
-        if (results.length) {
-            logger.warn({ query }, 'Using Wikipedia metadata because MovieBox search is unavailable.');
-        }
-        return results;
-    } catch (fallbackError) {
-        logger.error({ query, wikipediaError: fallbackError?.message || String(fallbackError), movieBoxError: originalError?.message || null }, 'Both MovieBox and Wikipedia metadata search failed.');
-        throw fallbackError;
-    }
-}
-
-async function searchMovieBoxOrFallback(query) {
-    if (!movieBoxEnabled) {
-        return useWikipediaFallback(query, new Error('MovieBox API is not configured.'));
-    }
-    if (Date.now() < movieBoxUnavailableUntil) {
-        return useWikipediaFallback(query, new Error('MovieBox is temporarily rate-limited.'));
-    }
-    try {
-        const results = await searchMovieBox(query);
-        if (results.length) return results;
-        return useWikipediaFallback(query, new Error('MovieBox returned no matching titles.'));
-    } catch (error) {
-        const status = Number(error?.response?.status || 0);
-        let cooldownSeconds = status === 429 ? 300 : ([502, 503, 504].includes(status) ? 60 : 30);
-        movieBoxUnavailableUntil = Date.now() + cooldownSeconds * 1000;
-        return useWikipediaFallback(query, error);
-    }
-}
-
 async function searchMovies(query) {
     if (chamaCineSubzEnabled) {
         try {
             const results = await searchCineSubz(query);
             if (results.length) return results;
         } catch (error) {
-            logger.warn({ httpStatus: error?.response?.status || null }, 'Chama CineSubz search failed; trying fallbacks.');
+            logger.warn({ httpStatus: error?.response?.status || null }, 'Chama CineSubz search failed.');
         }
     }
-    return searchMovieBoxOrFallback(query);
+    return [];
 }
 
 async function getMovieMetadata(movie) {
@@ -334,8 +215,39 @@ async function getMovieMetadata(movie) {
             const directorValue = data.directors || data.director || '';
             const directors = Array.isArray(directorValue) ? directorValue.map(value => safeText(value, '')).filter(Boolean) : String(directorValue).split(/\s*,\s*/).map(value => value.trim()).filter(Boolean);
 
-            const possibleDownloadValue = data.download_url || data.downloadUrl || data.link || data.dl_link || data.download || data.file || data.url || '';
-            const downloadUrl = absoluteHttpUrl(possibleDownloadValue, 'https://cinesubz.net');
+            // Deep search for any potential download link inside data object or arrays
+            let foundDownloadUrl = '';
+            const possibleFields = [data.download_url, data.downloadUrl, data.link, data.dl_link, data.download, data.file, data.url, rawData.url];
+            for (const field of possibleFields) {
+                if (typeof field === 'string' && /^https?:\/\//i.test(field) && field !== movie.movieUrl) {
+                    foundDownloadUrl = field;
+                    break;
+                }
+            }
+
+            // Check if there are download arrays or links array inside data
+            if (!foundDownloadUrl) {
+                for (const key of Object.keys(data)) {
+                    const val = data[key];
+                    if (Array.isArray(val)) {
+                        for (const item of val) {
+                            if (typeof item === 'string' && /^https?:\/\//i.test(item)) {
+                                foundDownloadUrl = item;
+                                break;
+                            } else if (item && typeof item === 'object') {
+                                const subVal = item.link || item.url || item.download || item.dl || '';
+                                if (typeof subVal === 'string' && /^https?:\/\//i.test(subVal)) {
+                                    foundDownloadUrl = subVal;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if (foundDownloadUrl) break;
+                }
+            }
+
+            const downloadUrl = absoluteHttpUrl(foundDownloadUrl, 'https://cinesubz.net');
 
             return {
                 title: safeText(data.title, movie.title),
@@ -360,7 +272,7 @@ async function getMovieMetadata(movie) {
         language: safeText(movie.language),
         duration: safeText(movie.duration),
         imdb: safeText(movie.rating),
-        genres: movie.genre ? movie.genre.split(/\s*,\s*/).filter(Boolean) : [],
+        genres: [],
         directors: [],
         stars: [],
         thumbnail: movie.poster || '',
@@ -371,14 +283,12 @@ async function getMovieMetadata(movie) {
 }
 
 function makeResultsText(query, movies) {
-    const providerTitle = movies[0]?.provider === 'wikipedia' ? 'WIKIPEDIA MOVIE SEARCH' : movies[0]?.provider === 'cinesubz' ? 'CINESUBZ SEARCH' : 'MOVIEBOX SEARCH';
-    const lines = ['🎬 *' + providerTitle + '*', '', '🔎 Search: ' + query, ''];
+    const lines = ['🎬 *CINESUBZ SEARCH*', '', '🔎 Search: ' + query, ''];
     movies.forEach((movie, index) => {
         lines.push('*' + (index + 1) + '.* ' + movie.title);
         if (movie.language) lines.push('   🌐 Language: ' + movie.language);
         if (movie.quality) lines.push('   🎞️ Quality: ' + movie.quality);
-        if (movie.format) lines.push('   📦 Format: ' + movie.format);
-        if (movie.releaseDate) lines.push('   📅 Year: ' + (movie.releaseDate.match(/\d{4}/)?.[0] || movie.releaseDate));
+        if (movie.releaseDate) lines.push('   📅 Year: ' + movie.releaseDate);
         if (movie.rating) lines.push('   ⭐ Rating: ' + movie.rating);
     });
     lines.push('', '↩️ *Reply to THIS bot message with a number* (example: 2).');
