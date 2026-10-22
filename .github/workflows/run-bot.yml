@@ -22,9 +22,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: auth_info
-          key: wa-session-${{ github.run_id }}
+          key: wa-bot-session-fixed
           restore-keys: |
-            wa-session-
+            wa-bot-session-fixed
 
       - name: Run WhatsApp Bot
         env:
