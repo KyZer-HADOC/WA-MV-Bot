@@ -325,8 +325,7 @@ function formatDetails(movie, metadata) {
     '🎭 *Genres:* ' + (metadata.genres.length ? metadata.genres.join(', ') : 'Not listed'),
     '🎥 *Director(s):* ' + (metadata.directors.length ? metadata.directors.join(', ') : 'Not listed'),
     '🌟 *Cast:* ' + (metadata.stars.length ? metadata.stars.slice(0, 8).join(', ') : 'Not listed'),
-    '',
-    '🔎 Source: CineSubz via Chama API'
+    ''
   ];
   if (metadata.story && metadata.story !== 'Not listed') {
     lines.splice(lines.length - 1, 0, '', '📝 *Story:* ' + metadata.story.slice(0, 600));
@@ -502,7 +501,7 @@ async function sendAutomaticCineSubzMedia(sock, metadata) {
           document: { url: candidate.url },
           mimetype: 'video/mp4',
           fileName: filename,
-          caption: '🎬 *' + metadata.title + '*\n🎥 Video file'
+          caption: 'Any Movie Group'
         });
         logger.info({
           contentType: inspection.contentType || null,
