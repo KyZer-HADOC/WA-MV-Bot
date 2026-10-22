@@ -320,8 +320,11 @@ async function getMovieMetadata(movie) {
                 maxContentLength: 3 * 1024 * 1024
             });
 
-            const data = response.data?.data;
-            if (response.data?.status !== true || !data || typeof data !== 'object') {
+            logger.info({ fullApiResponse: response.data }, 'Chama CineSubz info response full payload');
+
+            const rawData = response.data;
+            const data = rawData?.data || rawData;
+            if (!data || typeof data !== 'object') {
                 throw new Error('Chama CineSubz info response did not contain movie details.');
             }
 
@@ -331,7 +334,8 @@ async function getMovieMetadata(movie) {
             const directorValue = data.directors || data.director || '';
             const directors = Array.isArray(directorValue) ? directorValue.map(value => safeText(value, '')).filter(Boolean) : String(directorValue).split(/\s*,\s*/).map(value => value.trim()).filter(Boolean);
 
-            const downloadUrl = absoluteHttpUrl(data.download_url || data.downloadUrl || data.link || data.dl_link || '', 'https://cinesubz.net');
+            const possibleDownloadValue = data.download_url || data.downloadUrl || data.link || data.dl_link || data.download || data.file || data.url || '';
+            const downloadUrl = absoluteHttpUrl(possibleDownloadValue, 'https://cinesubz.net');
 
             return {
                 title: safeText(data.title, movie.title),
@@ -347,7 +351,7 @@ async function getMovieMetadata(movie) {
                 downloadUrl
             };
         } catch (error) {
-            logger.warn({ httpStatus: error?.response?.status || null }, 'Chama CineSubz info lookup failed.');
+            logger.warn({ httpStatus: error?.response?.status || null, err: error.message }, 'Chama CineSubz info lookup failed.');
         }
     }
 
