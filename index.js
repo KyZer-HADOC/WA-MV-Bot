@@ -115,11 +115,28 @@ const DAILY_MOVIE_LIMIT = 4;
 const DAILY_LIMITS_PATH = path.join(__dirname, 'daily-limits.json');
 const DAILY_LIMIT_TIME_ZONE = 'Asia/Colombo';
 
+const DAILY_USAGE_SCHEMA_VERSION = 2;
+
 function loadDailyUsageStore() {
   try {
     if (!existsSync(DAILY_LIMITS_PATH)) return {};
     const parsed = JSON.parse(readFileSync(DAILY_LIMITS_PATH, 'utf8'));
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    if (
+      parsed &&
+      parsed.schemaVersion === DAILY_USAGE_SCHEMA_VERSION &&
+      parsed.days &&
+      typeof parsed.days === 'object' &&
+      !Array.isArray(parsed.days)
+    ) {
+      return parsed.days;
+    }
+
+    // Older versions counted searches, not successful movie-file deliveries.
+    // Reset those counters so failed/unfinished downloads do not use quota.
+    if (parsed && typeof parsed === 'object' && Object.keys(parsed).length) {
+      logger.info('Resetting legacy daily counters: only successfully delivered movie files count now.');
+    }
+    return {};
   } catch (error) {
     logger.warn({ err: error?.message || String(error) }, 'Could not load daily movie usage file; starting with an empty counter.');
     return {};
@@ -150,7 +167,11 @@ function saveDailyUsageStore() {
   }
 
   const temporaryPath = DAILY_LIMITS_PATH + '.tmp';
-  writeFileSync(temporaryPath, JSON.stringify(dailyUsageStore, null, 2), { encoding: 'utf8', mode: 0o600 });
+  writeFileSync(temporaryPath, JSON.stringify({
+    schemaVersion: DAILY_USAGE_SCHEMA_VERSION,
+    counting: 'successfully-delivered-movie-files',
+    days: dailyUsageStore
+  }, null, 2), { encoding: 'utf8', mode: 0o600 });
   renameSync(temporaryPath, DAILY_LIMITS_PATH);
 }
 
@@ -1065,26 +1086,6 @@ async function start() {
             requesterJid,
             expiresAt: Date.now() + SEARCH_TTL_MS
           });
-            await sock.sendMessage(jid, {
-              text: '😕 No matching titles were found for “' + text + '”. Your daily limit was not used.'
-            }, { quoted: message });
-            continue;
-          }
-
-          const resultMessage = await sock.sendMessage(jid, {
-            text: makeResultsText(text, movies) +
-              '\n\n🎟️ Daily movie requests: ' + quota.count + '/' + DAILY_MOVIE_LIMIT +
-              ' (resets at 12:00 AM Sri Lanka time).'
-          }, { quoted: message });
-
-          pendingSearches.set(resultMessage.key.id, {
-            movies,
-            requesterJid,
-            expiresAt: Date.now() + SEARCH_TTL_MS
-          });
-          // Count successful searches only. Once the choices were sent,
-          // the daily request has been consumed and must not be refunded.
-          dailyReservation = null;
         } finally {
           activeSearchChats.delete(jid);
         }
